@@ -75,6 +75,11 @@ class _ExecApprovalDeclined(RuntimeError):
     """
 
 
+
+def _task_card_title(adapter: Any) -> str:
+    resolve = getattr(adapter, "native_task_card_title", None)
+    return resolve() if callable(resolve) else t("gateway.progress.task_card_title")
+
 class TurnRunner:
     """Per-turn collaborator carrying ``GatewayRunner._run_agent_inner``'s tool-progress callbacks."""
 
@@ -355,7 +360,7 @@ class TurnRunner:
                       "error": t("gateway.progress.task_status_error")}
             lines = [t("gateway.progress.task_line", title=task["title"], status=labels.get(task["status"], task["status"]))
                      for task in self.visible_tasks()]
-            return t("gateway.progress.task_card_title") + "\n" + "\n".join(lines)
+            return _task_card_title(self.adapter) + "\n" + "\n".join(lines)
 
         def _upsert(self, call_id: str, title: str) -> dict[str, str]:
             if call_id not in self.tasks:
@@ -432,7 +437,7 @@ class TurnRunner:
                 return
         if not st.native_failed:
             result = await st.adapter.send_native_task_card_progress(
-                chat_id=ctx.source.chat_id, tasks=st.visible_tasks(), title=t("gateway.progress.task_card_title"),
+                chat_id=ctx.source.chat_id, tasks=st.visible_tasks(), title=_task_card_title(st.adapter),
                 reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata, fallback_text=st.fallback_text(),
             )
             if getattr(result, "success", False):
