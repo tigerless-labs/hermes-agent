@@ -2047,6 +2047,11 @@ class SlackAdapter(BasePlatformAdapter):
                 return self._truthy_config(value)
         return False
 
+    def native_task_card_title(self) -> str:
+        """Header of the Slack-native task card (``extra.task_card_title``)."""
+        extra = self.config.extra if isinstance(self.config.extra, dict) else {}
+        return str(extra.get("task_card_title") or "Hermes is working")
+
     def _native_task_card_key(
         self, chat_id: str, reply_to: Optional[str], metadata: Optional[Dict[str, Any]]
     ) -> Optional[Tuple[str, str, str]]:
