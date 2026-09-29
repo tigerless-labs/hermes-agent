@@ -840,3 +840,98 @@ class TestSlackReactionAuthorizationGate:
         assert "U_RANDO" in runner.auth_checked
         assert runner.handled == []
         adapter.handle_message.assert_not_called()
+
+
+# ===========================================================================
+# collapse_resolved_approvals — approved prompts shrink to one context line
+# ===========================================================================
+
+def _approval_click(adapter, action_id, command, *, resolved_count=1):
+    adapter._approval_resolved["9.9"] = False
+    prompt_text = f"⚠️ *Hermes wants to run a command*\n```\n{command}\n```\nWhy it was flagged: scan"
+    body = {
+        "message": {"ts": "9.9", "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": prompt_text}},
+            {"type": "actions", "elements": []},
+        ]},
+        "channel": {"id": "C1"},
+        "user": {"name": "alice", "id": "U_ALICE"},
+    }
+    client = adapter._team_clients["T1"]
+    client.chat_update = AsyncMock()
+
+    async def run():
+        with patch("tools.approval.resolve_gateway_approval", return_value=resolved_count):
+            await adapter._handle_approval_action(AsyncMock(), body, {"action_id": action_id, "value": "sk"})
+        return client.chat_update.call_args[1]
+
+    return run(), prompt_text
+
+
+def _collapsing_adapter():
+    adapter = _make_adapter()
+    adapter.config.extra["collapse_resolved_approvals"] = True
+    _attach_auth_runner(adapter)
+    return adapter
+
+
+class TestSlackCollapsedApproval:
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action_id", ["hermes_approve_once", "hermes_approve_session", "hermes_approve_always"])
+    async def test_approved_prompt_collapses_to_one_line_naming_command(self, action_id):
+        command = "curl -s --max-time 10 ipinfo.io/json"
+        pending, prompt_text = _approval_click(_collapsing_adapter(), action_id, command)
+        update = await pending
+        assert [b["type"] for b in update["blocks"]] == ["context"]
+        line = update["blocks"][0]["elements"][0]["text"]
+        assert "\n" not in line
+        assert command in line
+        assert len(line) < len(prompt_text)
+        assert SlackAdapter._APPROVAL_DECISIONS[SlackAdapter._APPROVAL_CHOICES[action_id]].split(" by ")[0] in line
+
+    @pytest.mark.asyncio
+    async def test_long_command_is_truncated_on_the_collapsed_line(self):
+        command = "curl " + "x" * 500
+        pending, _ = _approval_click(_collapsing_adapter(), "hermes_approve_session", command)
+        line = (await pending)["blocks"][0]["elements"][0]["text"]
+        assert len(line) < len(command)
+        assert "…" in line
+
+    @pytest.mark.asyncio
+    async def test_backtick_in_command_cannot_close_the_code_span(self):
+        pending, _ = _approval_click(_collapsing_adapter(), "hermes_approve_once", "echo `id` && echo ok")
+        line = (await pending)["blocks"][0]["elements"][0]["text"]
+        assert line.count("`") == 2
+
+    @pytest.mark.asyncio
+    async def test_denied_prompt_keeps_full_text(self):
+        pending, prompt_text = _approval_click(_collapsing_adapter(), "hermes_deny", "rm -rf /tmp/x")
+        update = await pending
+        assert update["blocks"][0]["type"] == "section"
+        assert update["blocks"][0]["text"]["text"] == prompt_text
+
+    @pytest.mark.asyncio
+    async def test_expired_prompt_keeps_full_text(self):
+        pending, prompt_text = _approval_click(
+            _collapsing_adapter(), "hermes_approve_once", "curl ipinfo.io", resolved_count=0)
+        update = await pending
+        assert update["blocks"][0]["type"] == "section"
+        assert update["blocks"][0]["text"]["text"] == prompt_text
+
+    @pytest.mark.asyncio
+    async def test_collapse_is_opt_in(self):
+        adapter = _make_adapter()
+        _attach_auth_runner(adapter)
+        pending, prompt_text = _approval_click(adapter, "hermes_approve_session", "curl ipinfo.io")
+        update = await pending
+        assert update["blocks"][0]["type"] == "section"
+        assert update["blocks"][0]["text"]["text"] == prompt_text
+
+    @pytest.mark.asyncio
+    async def test_slack_autolinks_in_command_render_as_plain_text(self):
+        pending, _ = _approval_click(
+            _collapsing_adapter(), "hermes_approve_once", "curl -s <http://ipinfo.io/json|ipinfo.io/json> && curl <https://x.test/a>")
+        line = (await pending)["blocks"][0]["elements"][0]["text"]
+        assert "<" not in line and "|" not in line
+        assert "ipinfo.io/json" in line

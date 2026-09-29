@@ -5512,9 +5512,36 @@ class SlackAdapter(BasePlatformAdapter):
             decision_text = (
                 "⌛ Approval expired — command was not run (already timed out or resolved elsewhere)"
             )
+        if count and choice != "deny" and self._extra_flag("collapse_resolved_approvals"):
+            await self._collapse_interactive_message(
+                channel_id, msg_ts, self._collapsed_approval_line(self._section_text(message), decision_text),
+                "approval", team_id or None)
+            return
         await self._finalize_interactive_message(
             channel_id, msg_ts, self._section_text(message), decision_text,
             "Command approval request", "approval", team_id or None)
+
+    _COLLAPSED_COMMAND_CHARS: ClassVar[int] = 60
+
+    @classmethod
+    def _collapsed_approval_line(cls, prompt_text: str, decision_text: str) -> str:
+        fenced = re.search(r"```(?:[^\n`]*\n)?(.*?)```", prompt_text or "", re.DOTALL)
+        if not fenced:
+            return decision_text
+        command = re.sub(r"<([^<>|]+)(?:\|([^<>]*))?>", lambda m: m.group(2) or m.group(1), fenced.group(1))
+        command = " ".join(command.split()).replace("`", "ˋ")
+        if len(command) > cls._COLLAPSED_COMMAND_CHARS:
+            command = command[: cls._COLLAPSED_COMMAND_CHARS].rstrip() + "…"
+        return f"{decision_text} · `{command}`"
+
+    async def _collapse_interactive_message(
+        self, channel_id: str, msg_ts: str, line: str, label: str, team_id: Optional[str] = None) -> None:
+        blocks = [{"type": "context", "elements": [{"type": "mrkdwn", "text": line}]}]
+        try:
+            await self._get_client(channel_id, team_id=team_id).chat_update(
+                channel=channel_id, ts=msg_ts, text=line, blocks=sanitize_blocks(blocks))
+        except Exception as e:
+            logger.warning("[Slack] Failed to collapse %s message: %s", label, e)
 
     async def _update_clarify_message(
         self, channel_id: str, msg_ts: str, question_text: str, decision_text: str) -> None:
