@@ -1289,6 +1289,9 @@ DEFAULT_CONFIG = {
     "memory": {  # Persistent memory — bounded curated memory injected into the system prompt
         "memory_enabled": True,
         "user_profile_enabled": True,
+        # One MEMORY.md per chat for gateways shared by many people; USER.md only in direct messages;
+        # sessions outside any chat (cron, background) get no built-in memory.
+        "partition_by_chat": False,
         # Approval gate for memory writes on BOTH foreground turns and the background review fork.
         # true = foreground writes prompt inline; background writes are staged (/memory
         # pending|approve <id>|reject <id>). To disable memory: memory_enabled.

@@ -1279,12 +1279,17 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
         # Memory is optional — don't break agent init
         with suppress(Exception):
             from tools.memory_tool import (
-                MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags,
+                MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags, memory_partition,
             )
             mem_config = get_builtin_memory_config(_agent_cfg)
             agent._memory_enabled, agent._user_profile_enabled = get_builtin_memory_store_flags(
                 _agent_cfg
             )
+            partition = memory_partition(mem_config, platform, getattr(agent, "_chat_id", None),
+                                         getattr(agent, "_chat_type", None))
+            if partition is not None:
+                agent._memory_enabled = agent._memory_enabled and partition.notes
+                agent._user_profile_enabled = agent._user_profile_enabled and partition.profile
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
             if agent._memory_enabled or agent._user_profile_enabled:
                 agent._memory_store = MemoryStore(
@@ -1292,6 +1297,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
                     user_char_limit=mem_config.get("user_char_limit", 1375),
                     memory_enabled=agent._memory_enabled,
                     user_profile_enabled=agent._user_profile_enabled,
+                    memory_dir=None if partition is None else partition.directory,
                 )
                 agent._memory_store.load_from_disk()
 

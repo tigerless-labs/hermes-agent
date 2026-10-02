@@ -290,6 +290,26 @@ guidance for a narrower profile-only block. The tool schema advertises only the
 `user` target, and direct or staged writes to disabled `MEMORY.md` are rejected.
 The inverse configuration advertises only `memory` and rejects `USER.md` writes.
 
+## Partitioning memory by chat (`partition_by_chat`)
+
+One gateway often serves a whole team: many people, many channels, many direct messages. By default
+every session shares one `MEMORY.md` and one `USER.md`, so a note saved in one person's direct
+message is injected into everyone's next session. Turn on partitioning to keep them apart:
+
+```yaml
+memory:
+  partition_by_chat: true
+```
+
+- Each chat (a channel, a group, a direct message) gets its own `MEMORY.md` under
+  `memories/chats/<platform>-<chat id>/`. Threads in a channel share the channel's notes.
+- `USER.md` — the profile of *the* user — is kept only in direct messages. A shared chat has many
+  people, so it keeps notes only.
+- A session that belongs to no chat (cron jobs, background runs) gets no built-in memory.
+- The background memory review writes into the same partition as the session it reviews.
+
+`memory_enabled` and `user_profile_enabled` still apply on top: a partition can only narrow them.
+
 ## Controlling memory writes (`write_approval`)
 
 By default the agent saves memory freely — including from the background

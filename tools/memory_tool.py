@@ -7,7 +7,9 @@ Single `memory` tool: add/replace/remove or a batch `operations` list."""
 import copy
 import json
 import logging
+import re
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, Any, List, Optional, Tuple
@@ -253,6 +255,37 @@ def get_builtin_memory_config(config: Optional[Dict[str, Any]] = None) -> Dict[s
             return {}
     section = config.get("memory") if isinstance(config, dict) else None
     return section if isinstance(section, dict) else {}
+
+
+_DIRECT_CHAT_TYPES = frozenset({"dm", "direct", "private"})
+_PARTITION_UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+@dataclass(frozen=True)
+class MemoryPartition:
+    """Where one session's built-in memory lives when ``memory.partition_by_chat`` is on."""
+
+    directory: Optional[Path]
+    notes: bool
+    profile: bool
+
+
+def _partition_slug(value: str) -> str:
+    return _PARTITION_UNSAFE.sub("_", str(value)).strip("_")[:120]
+
+
+def memory_partition(section: Optional[Dict[str, Any]], platform: Optional[str], chat_id: Optional[str],
+                     chat_type: Optional[str]) -> Optional[MemoryPartition]:
+    """None unless ``partition_by_chat`` is on. Then every chat gets its own directory under
+    ``<memories>/chats``; the person profile (USER.md) is kept only in direct messages, because a
+    shared chat has many people; a session outside any chat (cron, background) gets no memory."""
+    if not is_truthy_value((section or {}).get("partition_by_chat"), default=False):
+        return None
+    if not platform or not chat_id:
+        return MemoryPartition(None, False, False)
+    name = f"{_partition_slug(platform)}-{_partition_slug(chat_id)}"
+    direct = str(chat_type or "").strip().lower() in _DIRECT_CHAT_TYPES
+    return MemoryPartition(get_memory_dir() / "chats" / name, True, direct)
 
 
 def get_builtin_memory_store_flags(config: Optional[Dict[str, Any]] = None) -> Tuple[bool, bool]:

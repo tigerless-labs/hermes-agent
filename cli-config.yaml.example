@@ -978,6 +978,10 @@ memory:
   # User profile: preferences, communication style, expectations
   user_profile_enabled: true
   
+  # Shared gateways (many people, many chats): one MEMORY.md per chat under memories/chats/,
+  # USER.md only in direct messages, no built-in memory for cron/background sessions.
+  partition_by_chat: false
+  
   # Character limits (~2.75 chars per token, model-independent)
   memory_char_limit: 2200   # ~800 tokens
   user_char_limit: 1375     # ~500 tokens
