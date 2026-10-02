@@ -7,7 +7,6 @@ Single `memory` tool: add/replace/remove or a batch `operations` list."""
 import copy
 import json
 import logging
-import re
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -258,7 +257,6 @@ def get_builtin_memory_config(config: Optional[Dict[str, Any]] = None) -> Dict[s
 
 
 _DIRECT_CHAT_TYPES = frozenset({"dm", "direct", "private"})
-_PARTITION_UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
 
 
 @dataclass(frozen=True)
@@ -270,10 +268,6 @@ class MemoryPartition:
     profile: bool
 
 
-def _partition_slug(value: str) -> str:
-    return _PARTITION_UNSAFE.sub("_", str(value)).strip("_")[:120]
-
-
 def memory_partition(section: Optional[Dict[str, Any]], platform: Optional[str], chat_id: Optional[str],
                      chat_type: Optional[str]) -> Optional[MemoryPartition]:
     """None unless ``partition_by_chat`` is on. Then every chat gets its own directory under
@@ -283,9 +277,9 @@ def memory_partition(section: Optional[Dict[str, Any]], platform: Optional[str],
         return None
     if not platform or not chat_id:
         return MemoryPartition(None, False, False)
-    name = f"{_partition_slug(platform)}-{_partition_slug(chat_id)}"
+    from hermes_constants import chat_scope_slug
     direct = str(chat_type or "").strip().lower() in _DIRECT_CHAT_TYPES
-    return MemoryPartition(get_memory_dir() / "chats" / name, True, direct)
+    return MemoryPartition(get_memory_dir() / "chats" / chat_scope_slug(platform, chat_id), True, direct)
 
 
 def get_builtin_memory_store_flags(config: Optional[Dict[str, Any]] = None) -> Tuple[bool, bool]:

@@ -30,10 +30,11 @@ _spillover_prune_lock = threading.Lock()
 _spillover_pruned_homes: set = set()  # profile home keys already swept this process
 
 
-def get_spillover_dir():
-    """Return $HERMES_HOME/cache/spillover as a Path (not created)."""
-    from hermes_constants import get_hermes_home
-    return get_hermes_home() / SPILLOVER_SUBDIR
+def get_spillover_dir(*, chat_scoped: bool = True):
+    """Return $HERMES_HOME/cache/spillover as a Path (not created); the current chat's
+    ``chats/<chat>`` dir under it when caches are scoped by chat."""
+    from hermes_constants import get_hermes_dir
+    return get_hermes_dir(SPILLOVER_SUBDIR, SPILLOVER_SUBDIR, chat_scoped=chat_scoped)
 
 
 def cleanup_spillover_cache(max_age_hours: int = SPILLOVER_MAX_AGE_HOURS) -> int:
@@ -41,8 +42,12 @@ def cleanup_spillover_cache(max_age_hours: int = SPILLOVER_MAX_AGE_HOURS) -> int
     contract as the ``cleanup_*_cache`` helpers the gateway housekeeping loop runs hourly)."""
     cutoff = time.time() - (max_age_hours * 3600)
     removed = 0
+    root = get_spillover_dir(chat_scoped=False)
     try:
-        entries = list(get_spillover_dir().iterdir())
+        entries = list(root.iterdir())
+        chats = root / "chats"
+        if chats.is_dir():
+            entries += [f for chat in chats.iterdir() if chat.is_dir() for f in chat.iterdir()]
     except OSError:
         return 0
     for f in entries:

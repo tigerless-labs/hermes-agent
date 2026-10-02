@@ -261,11 +261,21 @@ _CACHE_DIRS: list[tuple[str, str]] = [
 ]
 
 
-def _cache_dir_roots(container_base: str, *, create_missing: bool) -> Iterator[Tuple[Path, str]]:
-    """Yield ``(host_dir, container_root)`` per cache dir; always maps to the *new* container layout."""
+def _cache_dir_roots(container_base: str, *, create_missing: bool, scoped: bool = True) -> Iterator[Tuple[Path, str]]:
+    """Yield ``(host_dir, container_root)`` per cache dir; always maps to the *new* container layout.
+    With ``terminal.docker_cache_scope: chat`` and *scoped*, only the current chat's
+    ``<dir>/chats/<chat>`` is yielded (same relative path inside the container), and nothing at all
+    for a context outside any chat."""
+    from hermes_constants import current_chat_cache_scope
     base = container_base.rstrip("/")
+    scope = current_chat_cache_scope() if scoped else None
+    if scope == "":
+        return
     for new_subpath, old_name in _CACHE_DIRS:
-        host_dir = get_hermes_dir(new_subpath, old_name)
+        host_dir = get_hermes_dir(new_subpath, old_name, chat_scoped=False)
+        container_root = f"{base}/{new_subpath}"
+        if scope:
+            host_dir, container_root = host_dir / "chats" / scope, f"{container_root}/chats/{scope}"
         if not host_dir.is_dir():
             if not create_missing:
                 continue
@@ -282,7 +292,7 @@ def _cache_dir_roots(container_base: str, *, create_missing: bool) -> Iterator[T
                 host_dir.mkdir(parents=True, exist_ok=True)
             except OSError:
                 continue  # unwritable home (tests, RO mounts) — skip as before
-        yield host_dir, f"{base}/{new_subpath}"
+        yield host_dir, container_root
 
 
 def get_cache_directory_mounts(container_base: str = "/root/.hermes") -> List[Dict[str, str]]:
@@ -290,9 +300,14 @@ def get_cache_directory_mounts(container_base: str = "/root/.hermes") -> List[Di
     return [_mount(h, c) for h, c in _cache_dir_roots(container_base, create_missing=True)]
 
 
-def _remap_cache_path(path: str, container_base: str, src: str, dst: str, join: Callable[[str, Path], str]) -> Optional[str]:
-    """Translate *path* from the *src* side of a cache mount to its *dst* side; None if unmounted."""
-    for mount in get_cache_directory_mounts(container_base=container_base):
+def _remap_cache_path(path: str, container_base: str, src: str, dst: str, join: Callable[[str, Path], str],
+                      *, scoped: bool = True) -> Optional[str]:
+    """Translate *path* from the *src* side of a cache mount to its *dst* side; None if unmounted.
+    Unscoped translation covers every chat's directory (a pure path mapping); scoped translation
+    only the mounts this context actually has."""
+    mounts = (get_cache_directory_mounts(container_base=container_base) if scoped else
+              [_mount(h, c) for h, c in _cache_dir_roots(container_base, create_missing=True, scoped=False)])
+    for mount in mounts:
         if Path(path).is_relative_to(mount[src]):
             return join(mount[dst], Path(path).relative_to(mount[src]))
     return None
@@ -300,7 +315,8 @@ def _remap_cache_path(path: str, container_base: str, src: str, dst: str, join: 
 
 def map_cache_path_to_container(host_path: str, container_base: str = "/root/.hermes") -> Optional[str]:
     """POSIX container path for a host path under an auto-mounted cache dir, else None."""
-    return _remap_cache_path(host_path, container_base, "host_path", "container_path", lambda root, rel: posixpath.join(root, rel.as_posix()))
+    return _remap_cache_path(host_path, container_base, "host_path", "container_path",
+                             lambda root, rel: posixpath.join(root, rel.as_posix()), scoped=False)
 
 
 def from_agent_visible_cache_path(container_path: str, container_base: str = "/root/.hermes") -> str:

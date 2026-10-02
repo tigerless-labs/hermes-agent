@@ -667,14 +667,17 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
 
 
 def _cleanup_cache_dir(cache_dir: Path, max_age_hours: int) -> int:
-    """Delete files in *cache_dir* older than *max_age_hours*; return the count removed."""
+    """Delete files in *cache_dir* (and in its per-chat ``chats/<chat>`` dirs) older than
+    *max_age_hours*; return the count removed."""
     cutoff = time.time() - (max_age_hours * 3600)
     removed = 0
-    for f in cache_dir.iterdir():
-        if f.is_file() and f.stat().st_mtime < cutoff:
-            with contextlib.suppress(OSError):
-                f.unlink()
-                removed += 1
+    chats = cache_dir / "chats"
+    for directory in (cache_dir, *(d for d in (chats.iterdir() if chats.is_dir() else ()) if d.is_dir())):
+        for f in directory.iterdir():
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                with contextlib.suppress(OSError):
+                    f.unlink()
+                    removed += 1
     return removed
 
 
@@ -854,8 +857,18 @@ def _media_delivery_allowed_roots() -> List[Path]:
         root for chunk in media_delivery_allow_dirs().split(os.pathsep)
         for raw_root in chunk.split(",")
         if (root := Path(os.path.expanduser(raw_root.strip()))).is_absolute())
-    return [*map(Path, MEDIA_DELIVERY_SAFE_ROOTS), *_profile_cache_roots(),
+    return [*_chat_scoped_cache_roots([*map(Path, MEDIA_DELIVERY_SAFE_ROOTS), *_profile_cache_roots()]),
             *_kanban_attachment_roots(), *operator_roots]
+
+
+def _chat_scoped_cache_roots(roots: List[Path]) -> List[Path]:
+    """With ``terminal.docker_cache_scope: chat`` a cache root only allows the current chat's
+    ``chats/<chat>`` dir (none outside a chat); shared caches keep the roots unchanged."""
+    from hermes_constants import current_chat_cache_scope
+    scope = current_chat_cache_scope()
+    if scope is None:
+        return roots
+    return [root / "chats" / scope for root in roots] if scope else []
 
 
 def _media_delivery_recency_seconds() -> float:
@@ -880,7 +893,17 @@ def _media_delivery_denied_paths() -> List[Path]:
     return [*map(Path, _MEDIA_DELIVERY_DENIED_PREFIXES),
             *(home / sub for sub in _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS),
             *(r / rel for r in _credential_home_roots() for rel in _ROOT_CREDENTIAL_PATHS),
-            *_kanban_board_db_paths()]
+            *_kanban_board_db_paths(), *_other_chats_cache_dirs()]
+
+
+def _other_chats_cache_dirs() -> List[Path]:
+    """Every chat's cache dir is denied when caches are scoped by chat — even freshly written files
+    that the recency trust would otherwise admit; the current chat's dir is allowlisted, and the
+    allowlist wins."""
+    from hermes_constants import current_chat_cache_scope
+    if current_chat_cache_scope() is None:
+        return []
+    return [Path(root) / "chats" for root in (*MEDIA_DELIVERY_SAFE_ROOTS, *_profile_cache_roots())]
 
 
 def _resolve_path(path: Path, *, strict: bool = False, expand: bool = False) -> Optional[Path]:

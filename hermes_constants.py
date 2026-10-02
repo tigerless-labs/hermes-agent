@@ -411,7 +411,44 @@ def get_bundled_skills_dir(default: Path | None = None) -> Path:
     return _packaged_dir("HERMES_BUNDLED_SKILLS", default, "skills")
 
 
-def get_hermes_dir(new_subpath: str, old_name: str, *, home: Path | None = None) -> Path:
+# Cache dirs that ``terminal.docker_cache_scope: chat`` narrows to ``<dir>/chats/<chat>``.
+CHAT_SCOPED_CACHE_SUBPATHS = frozenset({
+    "cache/documents", "cache/images", "cache/audio", "cache/videos", "cache/screenshots", "cache/web",
+    "cache/delegation", "cache/spillover", "images", "attachments"})
+_CHAT_SCOPE_UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def chat_scope_slug(platform: str, chat_id: str) -> str:
+    """Filesystem-safe name of one chat (``<platform>-<chat id>``); no separators, so it cannot escape."""
+    def clean(value: str) -> str:
+        return _CHAT_SCOPE_UNSAFE.sub("_", str(value)).strip("_")[:120]
+    return f"{clean(platform)}-{clean(chat_id)}"
+
+
+def chat_cache_scope_enabled() -> bool:
+    """True when ``terminal.docker_cache_scope`` is ``chat`` (bridged to ``TERMINAL_DOCKER_CACHE_SCOPE``)."""
+    try:
+        from tools.terminal_scope import terminal_env
+        value = terminal_env("TERMINAL_DOCKER_CACHE_SCOPE")
+    except Exception:
+        value = os.environ.get("TERMINAL_DOCKER_CACHE_SCOPE", "")
+    return str(value).strip().lower() == "chat"
+
+
+def current_chat_cache_scope() -> str | None:
+    """None: caches are shared (default). ``""``: caches are scoped but this context belongs to no
+    chat, so it sees no cache. Otherwise the current chat's slug."""
+    if not chat_cache_scope_enabled():
+        return None
+    try:
+        from gateway.session_context import get_session_env
+        platform, chat_id = get_session_env("HERMES_SESSION_PLATFORM"), get_session_env("HERMES_SESSION_CHAT_ID")
+    except Exception:
+        return ""
+    return chat_scope_slug(platform, chat_id) if platform and chat_id else ""
+
+
+def get_hermes_dir(new_subpath: str, old_name: str, *, home: Path | None = None, chat_scoped: bool = True) -> Path:
     """Resolve a Hermes subdirectory, honouring a populated legacy ``<old_name>/`` (no migration).
 
     An empty legacy dir does NOT count (install scaffolds, manual mkdir) so it cannot shadow the new path.
@@ -423,7 +460,12 @@ def get_hermes_dir(new_subpath: str, old_name: str, *, home: Path | None = None)
     """
     home = home or get_hermes_home()
     old_path = home / old_name
-    return old_path if _legacy_path_has_content(old_path) else home / new_subpath
+    resolved = old_path if _legacy_path_has_content(old_path) else home / new_subpath
+    if chat_scoped and new_subpath in CHAT_SCOPED_CACHE_SUBPATHS:
+        scope = current_chat_cache_scope()
+        if scope:
+            return resolved / "chats" / scope
+    return resolved
 
 
 def iter_hermes_node_dirs(home: Path | None = None) -> list[Path]:

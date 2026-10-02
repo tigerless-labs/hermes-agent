@@ -415,6 +415,7 @@ terminal:
   #   profile - force HERMES_HOME/home for strict per-profile CLI config isolation
   home_mode: "auto"
   docker_mount_cwd_to_workspace: false  # SECURITY: off by default. Opt in to mount the launch cwd into Docker /workspace.
+  docker_cache_scope: shared  # "chat": each chat writes/mounts only its own cache/<kind>/chats/<chat>; chat-less sessions mount none
   lifetime_seconds: 300
   # sudo_password: "hunter2"  # Optional: pipe a sudo password via sudo -S. SECURITY WARNING: plaintext.
   # sudo_password: ""         # Explicit empty password: try empty and never open the interactive sudo prompt.

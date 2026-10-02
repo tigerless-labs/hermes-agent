@@ -345,6 +345,9 @@ DEFAULT_CONFIG = {
         # /output/... inside Docker and emit the host-visible path in MEDIA:, not the container one.
         "docker_volumes": [],
         "docker_mount_cwd_to_workspace": False,  # mount host cwd at /workspace (weakens isolation)
+        # "chat": each chat writes and mounts only its own cache/<kind>/chats/<chat> (uploads, screenshots,
+        # web pages, spillover), media delivery refuses other chats' files, chat-less sessions mount none.
+        "docker_cache_scope": "shared",
         "docker_network": True,  # false = --network=none, no network access from commands
         "docker_extra_args": [],        # Extra flags passed verbatim to docker run
         # /dev/shm size for the Docker sandbox. Docker's 64 MB default silently breaks
