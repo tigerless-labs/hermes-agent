@@ -1312,6 +1312,9 @@ DEFAULT_CONFIG = {
         "memory_enabled": True,
         "user_profile_enabled": True,
         "prefetch_spill_enabled": False,  # External recall opt-in to hooks.output_spill.
+        # One MEMORY.md per chat for gateways shared by many people; USER.md only in direct messages;
+        # sessions outside any chat (cron, background) get no built-in memory.
+        "partition_by_chat": False,
         # Approval gate for memory writes on BOTH foreground turns and the background review fork.
         # true = foreground writes prompt inline; background writes are staged (/memory
         # pending|approve <id>|reject <id>). To disable memory: memory_enabled.
