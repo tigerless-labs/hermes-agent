@@ -146,6 +146,10 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     # HOME (test_subprocess_home_isolation red locally, green on CI).
     "HERMES_REAL_HOME",
     "TERMINAL_HOME_MODE",
+    # Cache layout and retention: a leaked chat scope or max age (the dashboard config round-trip
+    # writes every terminal key to os.environ) moves or keeps unrelated tests' cache files.
+    "TERMINAL_DOCKER_CACHE_SCOPE",
+    "TERMINAL_CACHE_MAX_AGE_HOURS",
     "HERMES_INTERACTIVE",
     "HERMES_QUIET",
     "HERMES_TOOL_PROGRESS",

@@ -4571,7 +4571,8 @@ def _housekeeping_channel_directory(adapters, loop) -> None:
 
 
 def _housekeeping_media_caches() -> None:
-    """Every platform media cache prunes on the same hourly cadence (24h max age)."""
+    """Every platform media cache prunes on the same hourly cadence and the same max age
+    (``terminal.cache_max_age_hours``)."""
     from gateway.platforms.base import (
         cleanup_audio_cache, cleanup_document_cache, cleanup_image_cache, cleanup_screenshot_cache,
         cleanup_video_cache)
@@ -4579,8 +4580,9 @@ def _housekeeping_media_caches() -> None:
     from tools.environments.local import cleanup_terminal_temp_cache
     from tools.bot_mode_dm import cleanup_bot_dm_cache
     from tools.bot_relay import cleanup_bot_relay_artifacts
-    from agent.provider_media import MEDIA_CACHE_MAX_AGE_HOURS
+    from hermes_constants import cache_max_age_hours
 
+    max_age_hours = cache_max_age_hours()
     for cache_name, cleanup_fn in (
         ("Image", cleanup_image_cache), ("Document", cleanup_document_cache),
         ("Audio", cleanup_audio_cache), ("Video", cleanup_video_cache),
@@ -4588,7 +4590,7 @@ def _housekeeping_media_caches() -> None:
         ("Terminal temp", cleanup_terminal_temp_cache), ("Bot DM", cleanup_bot_dm_cache),
         ("Bot relay", cleanup_bot_relay_artifacts)):
         def _one(name=cache_name, fn=cleanup_fn):
-            removed = fn(max_age_hours=MEDIA_CACHE_MAX_AGE_HOURS)
+            removed = fn(max_age_hours=max_age_hours)
             if removed:
                 logger.info("%s cache cleanup: removed %d stale file(s)", name, removed)
         _housekeeping_chore(f"{cache_name} cache cleanup", _one)
