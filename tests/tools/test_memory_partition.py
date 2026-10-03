@@ -2,7 +2,8 @@
 
 One gateway instance can serve many people in many chats. With the switch on, each chat gets its
 own MEMORY.md, the person profile (USER.md) is kept only in direct messages, and a session that
-belongs to no chat (cron, background) gets no built-in memory. With the switch off nothing changes.
+belongs to no chat (cron, background) gets no built-in memory. The memory guidance then tells the model
+its memory belongs to this chat. With the switch off nothing changes.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 from agent.agent_init import _init_memory
+from agent.prompt_builder import ACROSS_SESSIONS_SCOPE, THIS_CHAT_SCOPE, build_memory_guidance
+from agent.system_prompt import _tool_guidance_block
 from tools import memory_tool
 from tools.memory_tool import MemoryStore, memory_partition
 
@@ -30,7 +33,7 @@ def _partitioned(**overrides) -> dict:
 
 def _agent(chat_id: str | None, chat_type: str | None) -> SimpleNamespace:
     return SimpleNamespace(_chat_id=chat_id, _chat_type=chat_type, enabled_toolsets=None, disabled_toolsets=None,
-                           tools=[], valid_tool_names=set())
+                           tools=[], valid_tool_names={"memory"})
 
 
 def test_a_store_bound_to_a_directory_reads_and_writes_only_there(memory_root: Path, tmp_path: Path) -> None:
@@ -114,3 +117,28 @@ def test_without_the_switch_the_agent_uses_the_shared_store(memory_root: Path) -
     agent = _agent("C1", "group")
     _init_memory(agent, {"memory": {}}, False, "slack")
     assert agent._memory_store.memory_dir is None and agent._user_profile_enabled
+
+
+def test_without_the_switch_the_guidance_is_the_unpartitioned_one(memory_root: Path) -> None:
+    agent = _agent("C1", "group")
+    _init_memory(agent, {"memory": {}}, False, "slack")
+    assert _tool_guidance_block(agent) == build_memory_guidance(True, True, skill_manage_available=False)
+    assert ACROSS_SESSIONS_SCOPE in _tool_guidance_block(agent)
+
+
+@pytest.mark.parametrize("chat_id,chat_type,overrides", [
+    ("C1", "group", {}), ("D1", "dm", {}), ("D1", "dm", {"memory_enabled": False})])
+def test_a_partitioned_session_is_told_its_memory_belongs_to_this_chat(memory_root: Path, chat_id, chat_type,
+                                                                       overrides) -> None:
+    agent = _agent(chat_id, chat_type)
+    _init_memory(agent, _partitioned(**overrides), False, "slack")
+    guidance = _tool_guidance_block(agent)
+    assert THIS_CHAT_SCOPE in guidance and ACROSS_SESSIONS_SCOPE not in guidance
+    assert guidance == build_memory_guidance(agent._memory_enabled, agent._user_profile_enabled,
+                                             skill_manage_available=False, chat_scoped=True)
+
+
+def test_redteam_a_session_outside_any_chat_gets_no_memory_guidance(memory_root: Path) -> None:
+    agent = _agent(None, None)
+    _init_memory(agent, _partitioned(), False, "cron")
+    assert _tool_guidance_block(agent) is None
