@@ -1,0 +1,89 @@
+name: lara-track-upstream
+
+# Moves the fork's own commits (branch lara) onto each new upstream release and runs their tests:
+# green opens a pull request into lara, conflicts or failing tests open an issue.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Upstream release tag to move lara onto (default: the newest)"
+        required: false
+        default: ""
+      force:
+        description: "Rebuild even when lara already sits on the target"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: lara-track-upstream
+  cancel-in-progress: false
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: lara
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: install
+        run: |
+          python -m pip install --quiet uv
+          uv venv --quiet .venv
+          uv pip install --quiet -p .venv/bin/python -e ".[dev,slack]"
+      - name: move lara onto the release
+        id: track
+        env:
+          TARGET: ${{ inputs.target }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          git config user.name "lara-track-upstream"
+          git config user.email "lara-track-upstream@users.noreply.github.com"
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          args=(--upstream upstream --lara origin/lara)
+          [ -n "$TARGET" ] && args+=(--target "$TARGET")
+          [ "$FORCE" = "true" ] && args+=(--force)
+          set +e
+          PATH="$PWD/.venv/bin:$PATH" bash scripts/lara_track_upstream.sh "${args[@]}" > track.log 2>&1
+          status=$?
+          set -e
+          cat track.log
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "branch=$(sed -n 's/^green: //p' track.log)" >> "$GITHUB_OUTPUT"
+          echo "target=$(sed -n 's/^base: .*target: \([^ ]*\).*/\1/p' track.log)" >> "$GITHUB_OUTPUT"
+      - name: open a pull request into lara
+        if: steps.track.outputs.status == '0' && steps.track.outputs.branch != ''
+        env:
+          BRANCH: ${{ steps.track.outputs.branch }}
+          RELEASE: ${{ steps.track.outputs.target }}
+        run: |
+          git push --force origin "$BRANCH"
+          if [ -z "$(gh pr list --head "$BRANCH" --base lara --json number --jq '.[0].number')" ]; then
+            { echo "Moves lara onto $RELEASE. Merge by fast-forwarding lara to this branch, then bump HERMES_REV in tigerless-agent's engine bundle."; echo; echo '```'; tail -n 40 track.log; echo '```'; } > body.md
+            gh pr create --base lara --head "$BRANCH" --title "Move lara onto $RELEASE" --body-file body.md
+          fi
+      - name: open an issue when it cannot move
+        if: steps.track.outputs.status == '2' || steps.track.outputs.status == '3'
+        env:
+          STATUS: ${{ steps.track.outputs.status }}
+          RELEASE: ${{ steps.track.outputs.target }}
+        run: |
+          what=$([ "$STATUS" = "2" ] && echo "conflicts" || echo "fork tests fail")
+          { echo '```'; tail -n 60 track.log; echo '```'; } > body.md
+          gh issue create --title "lara on $RELEASE: $what" --body-file body.md
+      - name: fail on anything else
+        if: steps.track.outputs.status != '0' && steps.track.outputs.status != '2' && steps.track.outputs.status != '3'
+        run: exit 1
