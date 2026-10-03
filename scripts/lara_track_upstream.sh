@@ -23,7 +23,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-release_tags() { git tag --list 'v[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*' --sort=-version:refname; }
+release_tag='^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}$'
+release_tags() { git tag --list 'v*' --sort=-version:refname | grep -E "$release_tag" || true; }
 
 git fetch --quiet --tags "$upstream"
 base=""
@@ -32,6 +33,7 @@ for tag in $(release_tags); do
 done
 [ -n "$base" ] || { echo "no upstream release tag is an ancestor of $lara" >&2; exit 64; }
 [ -n "$target" ] || target=$(release_tags | head -1)
+grep -qE "$release_tag" <<<"$target" || { echo "not a release tag: $target" >&2; exit 64; }
 
 echo "base: $base  target: $target  fork commits: $(git rev-list --count "$base..$lara")"
 if [ "$target" = "$base" ] && [ "$force" = 0 ]; then
