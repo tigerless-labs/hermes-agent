@@ -388,6 +388,10 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
     "TERMINAL_DOCKER_ORPHAN_REAPER",
     "TERMINAL_DOCKER_RUN_AS_HOST_USER",
+    # Cache layout and retention: a leaked chat scope or max age (the dashboard config round-trip
+    # writes every terminal key to os.environ) moves or keeps unrelated tests' cache files.
+    "TERMINAL_DOCKER_CACHE_SCOPE",
+    "TERMINAL_CACHE_MAX_AGE_HOURS",
     "BROWSER_CDP_URL",
     "CAMOFOX_URL",
     # Platform allowlists — not credentials, but if set from any source

@@ -21,7 +21,6 @@ PERSISTED_OUTPUT_TAG = "<persisted-output>"
 PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
 STORAGE_DIR = os.path.join(tempfile.gettempdir(), "hermes-results")
 SPILLOVER_SUBDIR = "cache/spillover"
-SPILLOVER_MAX_AGE_HOURS = 24
 _BUDGET_TOOL_NAME = "__budget_enforcement__"
 _UNSAFE_RESULT_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 _MAX_RESULT_FILENAME_STEM = 120
@@ -37,9 +36,13 @@ def get_spillover_dir(*, chat_scoped: bool = True):
     return get_hermes_dir(SPILLOVER_SUBDIR, SPILLOVER_SUBDIR, chat_scoped=chat_scoped)
 
 
-def cleanup_spillover_cache(max_age_hours: int = SPILLOVER_MAX_AGE_HOURS) -> int:
-    """Delete spillover files older than *max_age_hours*; returns count removed (same
-    contract as the ``cleanup_*_cache`` helpers the gateway housekeeping loop runs hourly)."""
+def cleanup_spillover_cache(max_age_hours: int | None = None) -> int:
+    """Delete spillover files older than *max_age_hours* (default: ``terminal.cache_max_age_hours``);
+    returns count removed (same contract as the ``cleanup_*_cache`` helpers the gateway housekeeping
+    loop runs hourly)."""
+    from hermes_constants import cache_max_age_hours
+    if max_age_hours is None:
+        max_age_hours = cache_max_age_hours()
     cutoff = time.time() - (max_age_hours * 3600)
     removed = 0
     root = get_spillover_dir(chat_scoped=False)

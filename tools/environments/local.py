@@ -39,8 +39,8 @@ logger = logging.getLogger(__name__)
 # get_temp_dir() defaults to HERMES_HOME/cache/terminal (real storage, not tmpfs), so
 # stale artifacts don't vanish on reboot: the gateway housekeeping loop prunes hourly
 # and a once-per-process sweep covers CLI-only installs. Retention is idle-based like
-# the scratch dir: an entry goes 24h after the last write anywhere inside it.
-TERMINAL_TEMP_MAX_IDLE_HOURS = 24
+# the scratch dir: an entry goes ``terminal.cache_max_age_hours`` after the last write
+# anywhere inside it.
 _terminal_temp_prune_lock = threading.Lock()
 _terminal_temp_pruned_once = False
 # Background artifacts come in triplets (hermes_bg_<id>.log/.pid/.exit). A live
@@ -58,16 +58,20 @@ def _default_terminal_temp_dir() -> "Path | None":
         return None
 
 
-def cleanup_terminal_temp_cache(max_age_hours: float = TERMINAL_TEMP_MAX_IDLE_HOURS) -> int:
+def cleanup_terminal_temp_cache(max_age_hours: float | None = None) -> int:
     """Delete session temp artifacts idle for *max_age_hours* (no write anywhere in a
     directory's subtree; the kwarg name is the ``cleanup_*_cache`` signature the gateway
     housekeeping loop calls every entry with); return count.
     Only the managed default dir is pruned — never a user-pointed ``terminal.temp_dir``."""
     from hermes_constants_scratch import subtree_touched_since
 
+    from hermes_constants import cache_max_age_hours
+
     root = _default_terminal_temp_dir()
     if root is None:
         return 0
+    if max_age_hours is None:
+        max_age_hours = cache_max_age_hours()
     cutoff = time.time() - (max_age_hours * 3600)
     try:
         entries = list(root.iterdir())

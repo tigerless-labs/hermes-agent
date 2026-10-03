@@ -349,6 +349,8 @@ Runs commands inside a Docker container with security hardening (all capabilitie
 
 **Caches scoped by chat (`docker_cache_scope: chat`).** Uploaded files, browser screenshots, cached web pages and oversized tool results live in host cache directories that are bind-mounted read-only into every sandbox — so on a gateway shared by a team, any conversation can read another chat's uploads and the results someone else fetched with their own access. With `docker_cache_scope: chat`, each chat (a channel, a group, a direct message) writes and mounts only `cache/<kind>/chats/<platform>-<chat>`; inbound attachments are moved there as they arrive; media delivery refuses other chats' files even when they are fresh; and a session that belongs to no chat (cron, background) mounts no cache at all. Cleanup sweeps every chat's directory on the usual schedule. Pair it with `container_persistent: false`.
 
+**Cache retention (`cache_max_age_hours`).** Every cache sweep — the gateway's hourly housekeeping, the once-per-process sweep of CLI-only installs and the browser's screenshot sweep — deletes files older than `terminal.cache_max_age_hours` (default 24). Lower it to shorten how long uploads and fetched results stay on disk; raise it to keep them longer. A value that is not a whole number of hours of at least 1 keeps the default.
+
 ```yaml
 terminal:
   backend: docker

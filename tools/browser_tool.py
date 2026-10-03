@@ -1254,7 +1254,7 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     result: Dict[str, Any] = {}
     try:
         screenshots_dir.mkdir(parents=True, exist_ok=True)
-        _lifecycle._cleanup_old_screenshots(screenshots_dir, max_age_hours=24)
+        _lifecycle._cleanup_old_screenshots(screenshots_dir)
         result, screenshot_path, error = _capture_vision_screenshot(
             effective_task_id, annotate, screenshot_path, _lp_prerouted)
         if error is not None:

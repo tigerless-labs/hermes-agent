@@ -348,6 +348,9 @@ DEFAULT_CONFIG = {
         # "chat": each chat writes and mounts only its own cache/<kind>/chats/<chat> (uploads, screenshots,
         # web pages, spillover), media delivery refuses other chats' files, chat-less sessions mount none.
         "docker_cache_scope": "shared",
+        # Hours before every cache sweep (uploads, screenshots, spillover, session temp) deletes a file;
+        # a whole number >= 1, anything else keeps 24.
+        "cache_max_age_hours": 24,
         "docker_network": True,  # false = --network=none, no network access from commands
         "docker_extra_args": [],        # Extra flags passed verbatim to docker run
         # /dev/shm size for the Docker sandbox. Docker's 64 MB default silently breaks

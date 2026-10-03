@@ -435,6 +435,25 @@ def chat_cache_scope_enabled() -> bool:
     return str(value).strip().lower() == "chat"
 
 
+DEFAULT_CACHE_MAX_AGE_HOURS = 24
+
+
+def cache_max_age_hours() -> int:
+    """Hours a cached file (upload, screenshot, spillover, session temp) lives before the sweeps delete
+    it: ``terminal.cache_max_age_hours`` (bridged to ``TERMINAL_CACHE_MAX_AGE_HOURS``), a whole number
+    of hours >= 1. Anything else keeps the default, so a typo never disables or empties the caches."""
+    try:
+        from tools.terminal_scope import terminal_env
+        raw = terminal_env("TERMINAL_CACHE_MAX_AGE_HOURS")
+    except Exception:
+        raw = os.environ.get("TERMINAL_CACHE_MAX_AGE_HOURS", "")
+    try:
+        hours = int(str(raw).strip())
+    except ValueError:
+        return DEFAULT_CACHE_MAX_AGE_HOURS
+    return hours if hours >= 1 else DEFAULT_CACHE_MAX_AGE_HOURS
+
+
 def current_chat_cache_scope() -> str | None:
     """None: caches are shared (default). ``""``: caches are scoped but this context belongs to no
     chat, so it sees no cache. Otherwise the current chat's slug."""

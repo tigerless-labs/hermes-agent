@@ -556,8 +556,12 @@ def _unlink_older_than(directory: Path, pattern: str, max_age_hours: float, labe
         _bt.logger.debug("%s cleanup error (non-critical): %s", label.capitalize(), e)
 
 
-def _cleanup_old_screenshots(screenshots_dir, max_age_hours=24):
-    """Prune old browser screenshots; throttled to once per hour per directory."""
+def _cleanup_old_screenshots(screenshots_dir, max_age_hours=None):
+    """Prune old browser screenshots (default age: ``terminal.cache_max_age_hours``); throttled to
+    once per hour per directory."""
+    from hermes_constants import cache_max_age_hours
+    if max_age_hours is None:
+        max_age_hours = cache_max_age_hours()
     key = str(screenshots_dir)
     now = time.time()
     if now - _bt._last_screenshot_cleanup_by_dir.get(key, 0.0) < 3600:
