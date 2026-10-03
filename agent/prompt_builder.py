@@ -187,22 +187,33 @@ HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = (
 )
 
 
+ACROSS_SESSIONS_SCOPE = "carried across sessions and loaded into each new session's context"
+# memory.partition_by_chat: the store is this chat's own, so the model must not describe it as shared.
+THIS_CHAT_SCOPE = (
+    "kept for this chat alone (every chat has its own and a direct message's belongs to that person, "
+    "so other chats' memory is not here) and loaded into each new session in this chat"
+)
+
+
 # Keep the every-session memory scope even when task knowledge cannot be saved as a skill.
 def build_memory_guidance(
     memory_enabled: bool = True, profile_enabled: bool = True, *, skill_manage_available: bool = True,
+    chat_scoped: bool = False,
 ) -> str:
     """Adapt store and skill-write guidance without widening what belongs in memory."""
     if not memory_enabled and not profile_enabled:
         return ""
+    scope, every_session = (THIS_CHAT_SCOPE, "EVERY session in this chat") if chat_scoped else (
+        ACROSS_SESSIONS_SCOPE, "EVERY session")
     if memory_enabled:
         frame = (
-            "You have persistent memory, carried across sessions and loaded "
-            "into each new session's context; the memory tool's schema defines what belongs there. "
+            f"You have persistent memory, {scope}; "
+            "the memory tool's schema defines what belongs there. "
         )
     else:
         frame = (
-            "You have a persistent user profile, carried across sessions and "
-            "loaded into each new session's context; save durable facts about the user with the "
+            f"You have a persistent user profile, {scope}; "
+            "save durable facts about the user with the "
             "memory tool (target='user') — the built-in notes store is disabled, so never target='memory'. "
         )
     skill_routing = (
@@ -216,8 +227,8 @@ def build_memory_guidance(
         "even when skill writing is unavailable. "
     )
     return frame + skill_routing + (
-        "Memory is the narrow exception for facts that apply to EVERY "
-        "session regardless of task (who the user is, environment facts, "
+        f"Memory is the narrow exception for facts that apply to {every_session} "
+        "regardless of task (who the user is, environment facts, "
         "standing conventions with no task home); it has a hard character "
         "budget, so when it fills, replace or consolidate stale entries "
         "rather than skipping the save. Write entries as declarative facts, "

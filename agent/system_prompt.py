@@ -282,6 +282,7 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
             getattr(agent, "_memory_enabled", True),
             getattr(agent, "_user_profile_enabled", True),
             skill_manage_available="skill_manage" in names,
+            chat_scoped=getattr(agent, "_memory_chat_scoped", False),
         )
     # Kanban lifecycle: resolved once at __init__ (_kanban_worker_guidance);
     # fallback paths must also limit task protocol guidance to dispatcher workers.

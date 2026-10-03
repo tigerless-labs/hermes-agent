@@ -1287,6 +1287,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
             )
             partition = memory_partition(mem_config, platform, getattr(agent, "_chat_id", None),
                                          getattr(agent, "_chat_type", None))
+            agent._memory_chat_scoped = partition is not None
             if partition is not None:
                 agent._memory_enabled = agent._memory_enabled and partition.notes
                 agent._user_profile_enabled = agent._user_profile_enabled and partition.profile

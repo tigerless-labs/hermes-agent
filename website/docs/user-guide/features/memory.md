@@ -307,6 +307,8 @@ memory:
   people, so it keeps notes only.
 - A session that belongs to no chat (cron jobs, background runs) gets no built-in memory.
 - The background memory review writes into the same partition as the session it reviews.
+- The memory guidance in the system prompt tells the model its memory belongs to this chat, so it
+  does not describe other chats' notes as available.
 
 `memory_enabled` and `user_profile_enabled` still apply on top: a partition can only narrow them.
 
