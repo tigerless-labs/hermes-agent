@@ -2170,6 +2170,7 @@ display:
   platforms: {}           # Per-platform display overrides (see below)
   interim_assistant_messages: true  # Gateway: send natural mid-turn assistant updates as separate messages
   suppress_warning_notifications: false  # Opt-in: hide automatic warning/diagnostic notices (see messaging guide)
+  agent_name: Hermes      # Gateway: what its own chat notices (shutdown, restart, back online, ...) call the agent
   show_commentary: true   # Codex models: deliver commentary-channel progress narration as visible mid-turn updates
   skin: default           # Built-in or custom CLI skin (see user-guide/features/skins)
   personality: ""         # Legacy cosmetic field still surfaced in some summaries

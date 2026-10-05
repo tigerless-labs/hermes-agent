@@ -1411,7 +1411,7 @@ class GatewayTurnMixin:
         """First-ever-message onboarding note + one-time 'no home channel' prompt (both only when
         the session has no history). Delivered on the user message (sidecar), NOT the ephemeral
         system prompt: present-on-turn-1/absent-on-turn-2 was a guaranteed prompt diff + rebuild."""
-        from gateway.run import _hermes_home, _home_target_env_var, _load_gateway_config
+        from gateway.run import _gateway_agent_name, _hermes_home, _home_target_env_var, _load_gateway_config
         if history:
             return
         if not await self.async_session_store.has_any_sessions():
@@ -1465,7 +1465,7 @@ class GatewayTurnMixin:
             sethome_cmd = "/hermes sethome" if source.platform == Platform.SLACK else "/sethome"
             await self._deliver_platform_notice(
                 source, f"📬 No home channel is set for {platform_name.title()}. "
-                f"A home channel is where Hermes delivers cron job results and cross-platform "
+                f"A home channel is where {_gateway_agent_name()} delivers cron job results and cross-platform "
                 f"messages.\n\nType {sethome_cmd} to make this chat your home channel, or ignore "
                 f"to skip.",
             )

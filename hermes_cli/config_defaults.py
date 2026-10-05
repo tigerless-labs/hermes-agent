@@ -802,6 +802,8 @@ DEFAULT_CONFIG = {
     "display": {
         "compact": False,
         "personality": "",
+        # What the gateway's own chat notices (shutdown, restart, back online, ...) call the agent.
+        "agent_name": "Hermes",
         "resume_display": "full",
         # Recap tuning for /resume and startup resume.
         "resume_exchanges": 10,            # max user+assistant pairs to show

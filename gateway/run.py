@@ -631,7 +631,7 @@ _PROVIDER_ERROR_REPLIES = (
     (_GATEWAY_ENDPOINT_UNREACHABLE_RE, "⚠️ The AI model service isn't reachable right now — the configured model "
                                        "endpoint is not running or is unreachable. Wait a moment and use /retry; "
                                        "if it persists, run `hermes doctor` on the host."),
-    (_GATEWAY_CONNECTION_ERROR_RE, "⚠️ Hermes could not reach the AI model service (no further detail from the "
+    (_GATEWAY_CONNECTION_ERROR_RE, "⚠️ {agent} could not reach the AI model service (no further detail from the "
                                    "SDK). Use /retry to try again; if it persists, run `hermes doctor` on the host."))
 
 
@@ -658,7 +658,8 @@ def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
     for pattern, reply in _PROVIDER_ERROR_REPLIES:
         if pattern.search(text):
-            return _rate_limit_reply(text) if pattern is _GATEWAY_RATE_LIMIT_RE else reply
+            return _rate_limit_reply(text) if pattern is _GATEWAY_RATE_LIMIT_RE else reply.format(
+                agent=_gateway_agent_name())
     return (
         "⚠️ The AI model service kept failing. Use /retry to try again, or /model to switch "
         "models. Details are in the gateway log (`hermes logs`).")
@@ -2897,6 +2898,11 @@ def _load_gateway_config(config_path: "Path | None" = None) -> dict:
     except Exception:
         logger.debug("Could not load gateway config from %s", config_path, exc_info=True)
         return {}
+
+
+def _gateway_agent_name() -> str:
+    """What the gateway's own chat notices call the agent: ``display.agent_name``, else ``Hermes``."""
+    return str(cfg_get(_load_gateway_config(), "display", "agent_name", default="") or "").strip() or "Hermes"
 
 
 def _checkpoint_agent_kwargs(config: dict | None) -> dict:

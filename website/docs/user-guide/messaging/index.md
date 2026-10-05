@@ -896,6 +896,20 @@ display:
       long_running_notifications: false
 ```
 
+### The agent's name in gateway notices
+
+The gateway's own chat notices — shutting down, restarting, back online, a
+scheduled job cut short, the AI model service unreachable, no home channel —
+call the agent "Hermes". A gateway running under another name sets it once:
+
+```yaml
+display:
+  agent_name: Ada
+```
+
+Only the agent's name changes; commands keep theirs (`hermes doctor`,
+`/hermes sethome` on Slack). Unset or blank keeps "Hermes".
+
 ### Warning and error notifications (opt-in suppression)
 
 Automatic warning and error notifications are shown by default. To suppress

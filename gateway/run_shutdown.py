@@ -908,7 +908,9 @@ class GatewayShutdownMixin:
         except Exception as e:
             logger.debug("Cron interrupt notification unavailable: %s", e)
             return 0
+        from gateway.run import _gateway_agent_name
         action = "restarting" if self._restart_requested else "shutting down"
+        agent = _gateway_agent_name()
         notified: set = set()
         for job_id in job_ids:
             try:
@@ -924,9 +926,9 @@ class GatewayShutdownMixin:
                 continue
             job_name = job.get("name") or job_id
             msg = (
-                f"⚠️ Scheduled job '{job_name}' was cut short because Hermes is {action}; "
+                f"⚠️ Scheduled job '{job_name}' was cut short because {agent} is {action}; "
                 "no result this run. It will run again on schedule, or run it now with "
-                f"`hermes cron run {job_name}` once Hermes is back."
+                f"`hermes cron run {job_name}` once {agent} is back."
             )
             for target in targets or ():
                 try:
@@ -1009,14 +1011,16 @@ class GatewayShutdownMixin:
 
         Called at the start of stop() while adapters are connected; send failures never block shutdown.
         """
+        from gateway.run import _gateway_agent_name
         restart_source = self._restart_command_source if self._restart_requested else None
+        agent = _gateway_agent_name()
         msg = (
-            "⚠️ Hermes is shutting down — your current task will be interrupted. "
+            f"⚠️ {agent} is shutting down — your current task will be interrupted. "
             "When it is back online, send any message and I'll try to pick up where we left off."
         )
         if self._restart_requested:
             msg = (
-                "⚠️ Hermes is restarting — your current task will be interrupted. "
+                f"⚠️ {agent} is restarting — your current task will be interrupted. "
                 "Send any message after the restart and I'll try to resume where you left off."
             )
         restart_key = None

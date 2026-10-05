@@ -1829,6 +1829,10 @@ display:
   #   false: Full ASCII banner with tool/skill summary (default)
   compact: false
 
+  # What the gateway's own chat notices (shutting down, restarting, back online, ...) call the
+  # agent. Commands keep their names (`hermes doctor`, /hermes on Slack).
+  agent_name: Hermes
+
   # Tool progress display level (CLI and gateway)
   #   off:     Silent — no tool activity shown, just the final response
   #   new:     Show a tool indicator only when the tool changes (skip repeats)

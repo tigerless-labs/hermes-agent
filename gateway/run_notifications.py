@@ -985,7 +985,8 @@ class GatewayNotificationsMixin:
         """
         delivered: set[tuple[str, str, Optional[str]]] = set()
         skipped = skip_targets or set()
-        message = "♻️ Gateway online — Hermes is back and ready."
+        from gateway.run import _gateway_agent_name
+        message = f"♻️ Gateway online — {_gateway_agent_name()} is back and ready."
         free_tier_line = self._free_tier_startup_line()
         if free_tier_line:
             message = f"{message}\n{free_tier_line}"
