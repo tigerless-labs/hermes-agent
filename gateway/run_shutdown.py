@@ -924,6 +924,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         except Exception as e:
             logger.debug("Cron interrupt notification unavailable: %s", e)
             return 0
+        from gateway.run import _gateway_notice
         action = t("gateway.shutdown.action_restarting" if self._restart_requested else "gateway.shutdown.action_shutting_down")
         notified: set = set()
         for job_id in job_ids:
@@ -939,7 +940,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
                 logger.debug("Cron interrupt targets unresolved for %s: %s", job_id, e)
                 continue
             job_name = job.get("name") or job_id
-            msg = t("gateway.shutdown.cron_interrupted", job=job_name, action=action)
+            msg = _gateway_notice("gateway.shutdown.cron_interrupted", job=job_name, action=action)
             for target in targets or ():
                 try:
                     platform = Platform(str(target.get("platform", "")).lower())
@@ -1024,8 +1025,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
 
         Called at the start of stop() while adapters are connected; send failures never block shutdown.
         """
+        from gateway.run import _gateway_notice
         restart_source = self._restart_command_source if self._restart_requested else None
-        msg = t("gateway.shutdown.notice_restart" if self._restart_requested else "gateway.shutdown.notice_shutdown")
+        msg = _gateway_notice("gateway.shutdown.notice_restart" if self._restart_requested else "gateway.shutdown.notice_shutdown")
         restart_key = None
         if restart_source is not None:
             with suppress(Exception):

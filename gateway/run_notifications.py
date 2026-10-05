@@ -840,7 +840,8 @@ class GatewayNotificationsMixin(GatewayNotificationOwnershipMixin):
         """
         delivered: set[tuple[str, str, Optional[str]]] = set()
         skipped = skip_targets or set()
-        message = t("gateway.startup.online")
+        from gateway.run import _gateway_notice
+        message = _gateway_notice("gateway.startup.online")
         targets = list(self._served_home_channel_transports())
         # A chat already notified for ANOTHER profile is not notified again.
         notified_chats = {

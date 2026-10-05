@@ -1411,7 +1411,7 @@ class GatewayTurnMixin:
         """First-ever-message onboarding note + one-time 'no home channel' prompt (both only when
         the session has no history). Delivered on the user message (sidecar), NOT the ephemeral
         system prompt: present-on-turn-1/absent-on-turn-2 was a guaranteed prompt diff + rebuild."""
-        from gateway.run import _gateway_config_home, _home_target_env_var, _load_gateway_config
+        from gateway.run import _gateway_config_home, _gateway_notice, _home_target_env_var, _load_gateway_config
         if history or internal:  # internal = plugin/system turn: no human made first contact
             return
         human_platform = bool(source.platform) and source.platform not in (Platform.LOCAL, Platform.WEBHOOK)
@@ -1453,7 +1453,7 @@ class GatewayTurnMixin:
             # Slack routes every command through the parent `/hermes`; bare `/sethome` would fail.
             sethome_cmd = "/hermes sethome" if source.platform == Platform.SLACK else "/sethome"
             await self._deliver_platform_notice(
-                source, t("gateway.notify.no_home_channel", platform=platform_name.title(), sethome_cmd=sethome_cmd),
+                source, _gateway_notice("gateway.notify.no_home_channel", platform=platform_name.title(), sethome_cmd=sethome_cmd),
             )
 
     def _hmwa_apply_message_timestamp(self, event, message_text):

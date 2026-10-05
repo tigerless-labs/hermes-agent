@@ -655,7 +655,7 @@ def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
     for pattern, reply_key in _PROVIDER_ERROR_REPLIES:
         if pattern.search(text):
-            return _rate_limit_reply(text) if pattern is _GATEWAY_RATE_LIMIT_RE else t(reply_key)
+            return _rate_limit_reply(text) if pattern is _GATEWAY_RATE_LIMIT_RE else _gateway_notice(reply_key)
     return t("gateway.errors.provider_kept_failing")
 
 
@@ -2876,6 +2876,24 @@ def _load_gateway_config(config_path: Path | None = None) -> dict:
     except Exception:
         logger.debug("Could not load gateway config from %s", config_path, exc_info=True)
         return {}
+
+
+def _gateway_agent_name() -> str:
+    """What the gateway's own chat notices call the agent: ``display.agent_name``, else ``Hermes``."""
+    return str(cfg_get(_load_gateway_config(), "display", "agent_name", default="") or "").strip() or "Hermes"
+
+
+def _gateway_notice(key: str, **fields: Any) -> str:
+    """``t(key, **fields)`` naming the agent by ``display.agent_name``; unset, the catalog text unchanged.
+    Only the catalog's own wording is renamed: field values are inserted afterwards, as written."""
+    name = _gateway_agent_name()
+    if name == "Hermes":
+        return t(key, **fields)
+    markers = {field: f"\x00{index}\x00" for index, field in enumerate(fields)}
+    text = t(key, **markers).replace("Hermes", name)
+    for field, marker in markers.items():
+        text = text.replace(marker, str(fields[field]))
+    return text
 
 
 def _checkpoint_agent_kwargs(config: dict | None) -> dict:
