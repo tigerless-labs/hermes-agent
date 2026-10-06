@@ -8,7 +8,7 @@ other's routing ids.  ``get_session_env`` is a drop-in for ``os.getenv``.
 import os
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, Optional
 
 # "Never set here" (falls back to os.environ for CLI/cron) vs "" = explicitly cleared (no fallback).
 _UNSET: Any = object()
@@ -55,6 +55,9 @@ _SESSION_ASYNC_DELIVERY = ContextVar("HERMES_SESSION_ASYNC_DELIVERY", default=_U
 # Request-local proof that the client resumes SessionDB history. No env fallback
 # or child-process export: a bound id alone cannot authorize detached delivery.
 _SESSION_HISTORY_DELIVERY = ContextVar("HERMES_SESSION_HISTORY_DELIVERY", default=_UNSET)
+
+# Resolves the id of the session whose reply is being delivered (``delivering_session_vars``).
+_DELIVERING_SESSION_ID: ContextVar[Optional[Callable[[], str]]] = ContextVar("HERMES_DELIVERING_SESSION_ID", default=None)
 
 # Cron auto-delivery vars, set per-job in run_job() so concurrent jobs don't clobber.
 _CRON_AUTO_DELIVER_PLATFORM = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default=_UNSET)
@@ -103,6 +106,44 @@ def scoped_current_session_id(session_id: str | None = None) -> Iterator[None]:
         yield
     finally:
         _SESSION_ID.set(previous)
+
+
+@contextmanager
+def delivering_session_vars(*, platform: str, chat_id: str, session_key: str,
+                            session_id: Callable[[], str]) -> Iterator[None]:
+    """Bind the chat and session a reply was produced in while its attachments are validated.
+
+    The adapter delivers a turn's reply after the turn cleared its session vars, so without this the
+    chat-scoped cache sees no chat (it allows nothing) and the sandbox fetch sees no session (it looks
+    for the shared ``default`` container). ``session_id`` runs at most once and only on first need:
+    looking the id up touches the session store, which ordinary replies must not. Restores the prior
+    values on exit; never touches ``os.environ``."""
+    resolved: list[str] = []
+
+    def once() -> str:
+        if not resolved:
+            resolved.append(session_id() or "")
+        return resolved[0]
+
+    bound = ((_SESSION_PLATFORM, platform), (_SESSION_CHAT_ID, chat_id), (_SESSION_KEY, session_key),
+             (_SESSION_ID, ""), (_DELIVERING_SESSION_ID, once))
+    tokens = [(var, var.set(value)) for var, value in bound]
+    try:
+        yield
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
+
+
+def delivering_session_id() -> str:
+    """The id of the session this context acts for — the one a live turn bound, else the one whose
+    reply is being delivered — or ``""``. Never read from ``os.environ``: the process env holds
+    whichever session wrote it last, so a check that decides what one session may reach must not."""
+    bound = _SESSION_ID.get()
+    if bound is not _UNSET and bound:
+        return bound
+    resolve = _DELIVERING_SESSION_ID.get()
+    return resolve() if resolve is not None else ""
 
 
 def source_route_metadata(source: Any, metadata: dict | None) -> dict | None:
