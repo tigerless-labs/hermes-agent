@@ -3904,6 +3904,10 @@ class GatewayRunner(
         gateway process, so model-emitted paths like `/output/report.txt` must be host-readable."""
         if os.getenv("TERMINAL_ENV", "").strip().lower() != "docker":
             return
+        from gateway.media_policy import media_delivery_trust_session_sandbox
+        from tools.terminal_tool import _docker_session_isolation_enabled
+        if media_delivery_trust_session_sandbox() and _docker_session_isolation_enabled():
+            return  # container-local paths reach the chat through the session's own sandbox
         connected = self.config.get_connected_platforms()
         messaging_platforms = [p for p in connected if p not in {Platform.LOCAL, Platform.API_SERVER, Platform.WEBHOOK}]
         if not messaging_platforms:

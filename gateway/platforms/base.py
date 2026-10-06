@@ -412,6 +412,7 @@ def is_host_excluded_by_no_proxy(hostname: str, no_proxy_value: str | None = Non
 import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Awaitable, Tuple, Union
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -1092,10 +1093,20 @@ def _warn_unresolved_docker_media(candidate: Path, session_key: str, reason: str
     """
     if not _docker_env_active():
         return
-    logger.warning("Docker MEDIA path %s did not resolve to a host sandbox file (%s%s); "
-                   "the producing container's sandbox directory may not exist yet or "
-                   "was pruned", _log_safe_path(str(candidate)), reason,
-                   f", session_key={session_key}" if session_key else "")
+    message = ("Docker MEDIA path %s did not resolve to a host sandbox file (%s%s); the producing "
+               "container's sandbox directory may not exist yet or was pruned" % (
+                   _log_safe_path(str(candidate)), reason, f", session_key={session_key}" if session_key else ""))
+    deferred = _DEFERRED_DOCKER_MISSES.get()
+    if deferred is not None:
+        deferred.append(message)
+        return
+    logger.warning(message)
+
+
+# Translation misses seen while ``_validated_delivery_path`` resolves one path: a miss the sandbox fetch
+# then recovers (the container path itself, then the host copy's own check) is no problem, so the misses
+# are logged only if the path is skipped in the end.
+_DEFERRED_DOCKER_MISSES: ContextVar[Optional[List[str]]] = ContextVar("deferred_docker_media_misses", default=None)
 
 
 def _translate_docker_container_media_path(candidate: Path, session_key: str = "") -> Optional[Path]:
@@ -1195,10 +1206,17 @@ def _validated_delivery_path(raw_path, session_key: str, label: str,
     ``dropped`` is a list, a rejected path is appended as ``{"path", "reason"}`` so the caller can
     report the drop instead of booking a delivery that never happened (#115908)."""
     raw = str(raw_path)
-    safe_path = validate_media_delivery_path(raw, session_key=session_key)
-    if not safe_path:
-        from gateway.media_fetch import fetch_remote_media
-        safe_path = fetch_remote_media(raw)
+    misses: List[str] = []
+    token = _DEFERRED_DOCKER_MISSES.set(misses)
+    try:
+        safe_path = validate_media_delivery_path(raw, session_key=session_key)
+        if not safe_path:
+            from gateway.media_fetch import fetch_remote_media
+            safe_path = fetch_remote_media(raw)
+    finally:
+        _DEFERRED_DOCKER_MISSES.reset(token)
+    for message in misses:
+        logger.log(logging.DEBUG if safe_path else logging.WARNING, message)
     if not safe_path:
         # Say WHY: a path that does not exist on the host is the common case (a model hallucinated or
         # a sandbox path failed to translate) and is not a security rejection.

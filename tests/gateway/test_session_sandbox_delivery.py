@@ -227,6 +227,55 @@ def test_two_copies_of_one_name_never_overwrite_each_other(home: Path, sandboxes
     assert (Path(first).read_bytes(), Path(second).read_bytes()) == (b"first", b"second")
 
 
+def _gateway_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= 30 and r.name.startswith("gateway")]
+
+
+def test_a_file_the_sandbox_fetch_delivers_logs_no_warning(home: Path, sandboxes: dict, trusted: None,
+                                                           caplog: pytest.LogCaptureFixture) -> None:
+    sandboxes[OWN] = _Sandbox({REPORT: b"own"})
+
+    with caplog.at_level("DEBUG"):
+        delivered, _ = _deliver(f"MEDIA:{REPORT}", {SESSION_KEY: OWN})
+
+    assert len(delivered) == 1
+    assert _gateway_warnings(caplog) == []
+
+
+def test_a_file_that_cannot_be_delivered_still_says_why(home: Path, sandboxes: dict, trusted: None,
+                                                        caplog: pytest.LogCaptureFixture) -> None:
+    sandboxes[OWN] = _Sandbox({})
+
+    with caplog.at_level("WARNING"):
+        delivered, _ = _deliver(f"MEDIA:{REPORT}", {SESSION_KEY: OWN})
+
+    warnings = _gateway_warnings(caplog)
+    assert delivered == []
+    assert any("did not resolve to a host sandbox file" in w and REPORT in w for w in warnings)
+    assert any(w.startswith("Skipping") and REPORT in w for w in warnings)
+
+
+@pytest.mark.parametrize("trusted_sandbox,per_session,warned", [
+    ("1", "false", False), ("", "false", True), ("1", "true", True)])
+def test_the_startup_warning_about_container_paths_is_given_only_when_they_cannot_be_delivered(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+        trusted_sandbox: str, per_session: str, warned: bool) -> None:
+    from types import SimpleNamespace
+
+    from gateway.run import GatewayRunner
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_CONTAINER_PERSISTENT", per_session)
+    monkeypatch.setenv("HERMES_MEDIA_DELIVERY_STRICT", "1")
+    monkeypatch.setenv("HERMES_MEDIA_TRUST_SESSION_SANDBOX", trusted_sandbox)
+    monkeypatch.delenv("TERMINAL_DOCKER_VOLUMES", raising=False)
+    runner = SimpleNamespace(config=SimpleNamespace(get_connected_platforms=lambda: [Platform.SLACK]))
+
+    with caplog.at_level("WARNING"):
+        GatewayRunner._warn_if_docker_media_delivery_is_risky(runner)
+
+    assert any("output mount" in w for w in _gateway_warnings(caplog)) is warned
+
+
 def test_a_fetch_that_fails_leaves_no_folder_behind(home: Path, sandboxes: dict, trusted: None) -> None:
     sandboxes[OWN] = _Sandbox({})
 
