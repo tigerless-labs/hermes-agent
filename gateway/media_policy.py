@@ -2,7 +2,8 @@
 
 ``validate_media_delivery_path`` reads ``HERMES_MEDIA_DELIVERY_STRICT`` (gateway.strict),
 ``HERMES_MEDIA_ALLOW_DIRS`` (gateway.media_delivery_allow_dirs) and
-``HERMES_MEDIA_TRUST_RECENT_FILES`` (gateway.trust_recent_files).  Every delivery
+``HERMES_MEDIA_TRUST_RECENT_FILES`` (gateway.trust_recent_files); the sandbox fetch reads
+``HERMES_MEDIA_TRUST_SESSION_SANDBOX`` (gateway.trust_session_sandbox).  Every delivery
 entrypoint (gateway startup, ``hermes cron run``, ``hermes send``) calls
 :func:`apply_media_policy_env` first so standalone paths filter under the gateway's
 policy instead of silently dropping attachments in strict/allowlisted deployments.
@@ -17,7 +18,8 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-_FLAG_ENVS = (("strict", "HERMES_MEDIA_DELIVERY_STRICT"), ("trust_recent_files", "HERMES_MEDIA_TRUST_RECENT_FILES"))
+_FLAG_ENVS = (("strict", "HERMES_MEDIA_DELIVERY_STRICT"), ("trust_recent_files", "HERMES_MEDIA_TRUST_RECENT_FILES"),
+              ("trust_session_sandbox", "HERMES_MEDIA_TRUST_SESSION_SANDBOX"))
 _ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
 _TRUST_RECENT_SECONDS_ENV = "HERMES_MEDIA_TRUST_RECENT_SECONDS"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -58,6 +60,14 @@ def media_delivery_trust_recent() -> bool:
     if cfg is not None:
         return bool(cfg.get("trust_recent_files", True))
     return os.environ.get(_FLAG_ENVS[1][1], "1").strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def media_delivery_trust_session_sandbox() -> bool:
+    """Strict delivery may fetch a file from the delivering session's own per-session sandbox."""
+    cfg = _routed_gateway_cfg()
+    if cfg is not None:
+        return bool(cfg.get("trust_session_sandbox", False))
+    return os.environ.get(_FLAG_ENVS[2][1], "0").strip().lower() in _TRUTHY
 
 
 def media_delivery_trust_recent_seconds() -> str:

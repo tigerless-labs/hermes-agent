@@ -147,10 +147,13 @@ def _build_docker_env(*, image, cwd, timeout, cc, task_id, host_cwd, **_):
     docker_env_obj = _DockerEnvironment(image=image, cwd=cwd, timeout=timeout, task_id=task_id, host_cwd=host_cwd,
                                         **_resources(cc), **kwargs)
     # Marker read by is_persistent_env(): a session-scoped container survives BETWEEN turns (skip
-    # per-turn teardown) but is removed at session close / idle timeout. Test doubles may reject attrs.
+    # per-turn teardown) but is removed at session close / idle timeout. Its /root is its own tmpfs, so
+    # the media fetch screens credential paths under that home instead of refusing all of /root.
+    # Test doubles may reject attrs.
     if session_scoped:
         try:
             docker_env_obj._session_scoped = True
+            docker_env_obj._remote_home = "/root"
         except AttributeError:
             pass
     return docker_env_obj

@@ -2214,6 +2214,12 @@ DEFAULT_CONFIG = {
         # Recency window in seconds; 600 covers a multi-tool turn. Bridged to
         # HERMES_MEDIA_TRUST_RECENT_SECONDS. Only consulted when strict is true.
         "trust_recent_files_seconds": 600,
+        # Strict mode never fetches a file from a terminal sandbox. True: a path the host lacks may be
+        # fetched from the delivering session's OWN per-session sandbox (docker with
+        # container_persistent false) — never a shared or another session's sandbox, never the engine's
+        # mounts inside it; the copy lands in the chat's cache. Bridged to
+        # HERMES_MEDIA_TRUST_SESSION_SANDBOX. Only consulted when strict is true.
+        "trust_session_sandbox": False,
         "api_server": {  # OpenAI-compatible API server platform (gateway/platforms/api_server.py).
             # Max concurrent agent runs. Requests to /v1/chat/completions, /v1/responses, and
             # /v1/runs beyond this get HTTP 429 + Retry-After, bounding CPU/memory/LLM-quota

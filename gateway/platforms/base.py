@@ -3566,6 +3566,27 @@ class BasePlatformAdapter(ABC):
             logger.debug("[%s] Failed to resolve media delivery scope", self.name, exc_info=True)
             return contextlib.nullcontext()
 
+    def _delivering_session_scope(self, source: Optional[SessionSource], session_key: str):
+        """Chat and session of the turn that produced a reply, bound while its attachments are
+        validated after the turn. The session id comes from the store's routing index, looked up
+        only if a sandbox fetch needs it, never from ``os.environ``. A no-op without a source."""
+        if source is None:
+            return contextlib.nullcontext()
+        from gateway.session_context import delivering_session_vars
+        store = getattr(self, "_session_store", None)
+
+        def session_id() -> str:
+            peek = getattr(store, "peek_session_id", None)
+            try:
+                return (peek(session_key) if callable(peek) and session_key else None) or ""
+            except Exception:
+                logger.debug("[%s] Could not resolve the delivering session id", self.name, exc_info=True)
+                return ""
+
+        platform = getattr(source.platform, "value", source.platform)
+        return delivering_session_vars(platform=str(platform or ""), chat_id=str(source.chat_id or ""),
+                                       session_key=session_key or "", session_id=session_id)
+
     def _final_delivery_adapter(self, source: Optional[SessionSource]) -> "BasePlatformAdapter":
         """The runner's CURRENT adapter for a new final-response send: a reconnect can swap the
         registry adapter mid-task; an unsent final response belongs on the replacement transport,
@@ -4383,8 +4404,9 @@ class BasePlatformAdapter(ABC):
         force_document = "[[as_document]]" in response
         pre_extract = response
         # The handler's routed profile scope is gone by now; Docker MEDIA translation and the
-        # bare-path validator infer the sandbox from the ACTIVE profile (#109024).
-        with self._media_delivery_scope(event.source):
+        # bare-path validator infer the sandbox from the ACTIVE profile (#109024). Its session vars
+        # are gone too: the chat-scoped cache and the sandbox fetch resolve from the producing session.
+        with self._media_delivery_scope(event.source), self._delivering_session_scope(event.source, session_key):
             media_files, response = self.extract_media(response)
             media_files = self.filter_media_delivery_paths(media_files, session_key=session_key)
             images, text_content = self.extract_images(response)
