@@ -199,6 +199,59 @@ def test_switched_on_strict_delivery_brings_the_sessions_own_file_into_its_chats
 
     assert [Path(path).read_bytes() for path in delivered] == [b"own", b"a,b"]
     assert all(_chat_documents(home).resolve() in Path(path).parents for path in delivered)
+    assert [Path(path).name for path in delivered] == [Path(REPORT).name, "summary.csv"]
+
+
+def test_a_fetched_file_keeps_the_name_a_person_sees_and_loses_what_could_disguise_it(
+        home: Path, sandboxes: dict, trusted: None) -> None:
+    readable = "/tmp/报告 (终版) 2026-10.xlsx"
+    sandboxes[OWN] = _Sandbox({readable: b"a", "/tmp/invoice‮xcod.pdf": b"b", "/tmp/plan​ .csv": b"c"},
+                              links={"/tmp/invoice.pdf": "/tmp/invoice‮xcod.pdf",
+                                     "/tmp/plan.csv": "/tmp/plan​ .csv"})
+
+    delivered, _ = _deliver(f"MEDIA:{readable} MEDIA:/tmp/invoice.pdf MEDIA:/tmp/plan.csv", {SESSION_KEY: OWN})
+
+    names = [Path(path).name for path in delivered]
+    assert names[0] == Path(readable).name
+    assert all(char.isprintable() for name in names for char in name)
+    assert [name.replace("_", "") for name in names[1:]] == ["invoicexcod.pdf", "plan.csv"]
+
+
+def test_two_copies_of_one_name_never_overwrite_each_other(home: Path, sandboxes: dict, trusted: None) -> None:
+    sandboxes[OWN] = _Sandbox({REPORT: b"first"})
+    [first], _ = _deliver(f"MEDIA:{REPORT}", {SESSION_KEY: OWN})
+    sandboxes[OWN].files[REPORT] = b"second"
+    [second], _ = _deliver(f"MEDIA:{REPORT}", {SESSION_KEY: OWN})
+
+    assert Path(first).name == Path(second).name and first != second
+    assert (Path(first).read_bytes(), Path(second).read_bytes()) == (b"first", b"second")
+
+
+def test_a_fetch_that_fails_leaves_no_folder_behind(home: Path, sandboxes: dict, trusted: None) -> None:
+    sandboxes[OWN] = _Sandbox({})
+
+    delivered, _ = _deliver(f"MEDIA:{REPORT}", {SESSION_KEY: OWN})
+
+    assert delivered == [] and sandboxes[OWN].fetched == [REPORT]
+    assert not list(_chat_documents(home).glob("remote_*")) if _chat_documents(home).exists() else True
+
+
+def test_the_cache_sweep_removes_old_fetched_copies_and_their_folders(home: Path, sandboxes: dict,
+                                                                      trusted: None) -> None:
+    import contextvars
+    import time
+
+    from gateway.platforms.base import cleanup_document_cache
+    sandboxes[OWN] = _Sandbox({REPORT: b"old", "/tmp/new.csv": b"new"})
+    [old], _ = _deliver(f"MEDIA:{REPORT}", {SESSION_KEY: OWN})
+    [new], _ = _deliver("MEDIA:/tmp/new.csv", {SESSION_KEY: OWN})
+    stale = time.time() - 3 * 3600
+    os.utime(old, (stale, stale))
+
+    removed = contextvars.Context().run(cleanup_document_cache, max_age_hours=1)
+
+    assert removed == 1
+    assert not Path(old).parent.exists() and Path(new).exists()
 
 
 def test_redteam_switched_on_strict_delivery_never_reads_another_sessions_sandbox(

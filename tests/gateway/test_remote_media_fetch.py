@@ -51,7 +51,7 @@ def test_sandbox_artifact_is_fetched_but_credentials_and_symlinks_to_them_are_no
     delivered = BasePlatformAdapter.filter_media_delivery_paths(media)
 
     assert [Path(p).read_bytes() for p, _ in delivered] == [b"hello from sandbox", b"hello from sandbox"]
-    assert all(Path(p).name.endswith("_report.txt") for p, _ in delivered)
+    assert all(Path(p).name == "report.txt" for p, _ in delivered)
     # The credential file and the symlink that resolves to it were refused BEFORE any bytes moved.
     assert remote_env.fetched == ["/home/agent/out/report.txt", "/home/agent/out/report.txt"]
 
