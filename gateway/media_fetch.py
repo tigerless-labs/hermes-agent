@@ -20,10 +20,11 @@ skills, config), whatever their names.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import posixpath
-import re
+import unicodedata
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Optional
@@ -104,6 +105,34 @@ def _held_back(path: str, remote_home: Optional[str], own_sandbox_only: bool) ->
     return remote_path_is_denied(path, remote_home) or (own_sandbox_only and _under_engine_mounts(path, remote_home))
 
 
+# Linux allows 255 bytes per name; this leaves room and keeps platform upload names reasonable.
+_NAME_MAX_BYTES = 200
+
+
+def _delivered_name(remote_path: str) -> str:
+    """The sandbox file's own name, which the chat shows. Control, invisible and line-breaking
+    characters (bidi overrides, zero-width spaces) become ``_`` so a name cannot disguise its type;
+    a name left empty or dots-only becomes ``file``; an overlong one keeps its suffix."""
+    name = "".join("_" if ch in "/\\" or unicodedata.category(ch)[0] == "C" or unicodedata.category(ch) in ("Zl", "Zp")
+                   else ch for ch in posixpath.basename(remote_path)).strip()
+    if not name.strip("."):
+        return "file"
+    stem, suffix = os.path.splitext(name)
+    while stem and len((stem + suffix).encode()) > _NAME_MAX_BYTES:
+        stem = stem[:-1]
+    return stem + suffix
+
+
+def _discard(folder: Optional[Path]) -> None:
+    """Remove a fetched copy's folder and whatever reached it."""
+    if folder is None:
+        return
+    with contextlib.suppress(OSError):
+        for leftover in folder.iterdir():
+            leftover.unlink()
+        folder.rmdir()
+
+
 def fetch_remote_media(path: str) -> Optional[str]:
     """Host path of a validated copy of sandbox file ``path``, or None (never raises). Only fires
     when a remote backend is active; the caller has already failed local validation."""
@@ -115,7 +144,8 @@ def fetch_remote_media(path: str) -> Optional[str]:
     if env is None:
         return None
     from gateway.platforms.base import (
-        _log_safe_path, _normalize_media_tag_path, get_document_cache_dir, validate_media_delivery_path)
+        FETCHED_MEDIA_DIR_PREFIX, _log_safe_path, _normalize_media_tag_path, get_document_cache_dir,
+        validate_media_delivery_path)
     from tools.environments.base import FileFetchError
 
     remote_home = getattr(env, "_remote_home", None)
@@ -126,26 +156,30 @@ def fetch_remote_media(path: str) -> Optional[str]:
         candidate = posixpath.normpath(posixpath.join(remote_home, candidate[2:]))
     if not candidate.startswith("/") or _held_back(candidate, remote_home, own_sandbox_only):
         return None
+    folder: Optional[Path] = None
     try:
         # ``[ -f ]`` in fetch_file follows symlinks, so the link TARGET is what gets screened;
         # an unresolvable path fails closed rather than trusting the unresolved name.
         resolved = env.fetch_realpath(candidate)
         if resolved is None or _held_back(resolved, remote_home, own_sandbox_only):
             return None
-        basename = re.sub(r"[^\w.\-]", "_", posixpath.basename(resolved)) or "file"
-        # The chat's own document cache when caches are chat-scoped: the only one delivery accepts.
-        dest = Path(get_document_cache_dir()) / f"remote_{uuid.uuid4().hex[:12]}_{basename}"
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Its own folder in the chat's document cache (the only cache delivery accepts when caches
+        # are chat-scoped): the chat shows the sandbox file's own name and two copies never collide.
+        folder = Path(get_document_cache_dir()) / f"{FETCHED_MEDIA_DIR_PREFIX}{uuid.uuid4().hex[:12]}"
+        dest = folder / _delivered_name(resolved)
+        folder.mkdir(parents=True, exist_ok=True)
         env.fetch_file(resolved, dest, max_bytes=_FETCH_MAX_BYTES)
     except FileFetchError as exc:
         logger.warning("Remote media fetch of %s skipped: %s", _log_safe_path(candidate), exc)
+        _discard(folder)
         return None
     except Exception:
         logger.warning("Remote media fetch of %s failed", _log_safe_path(candidate), exc_info=True)
+        _discard(folder)
         return None
     validated = validate_media_delivery_path(str(dest))
     if not validated:
-        dest.unlink(missing_ok=True)
+        _discard(folder)
         return None
     logger.info("Fetched remote media %s from the %s sandbox", _log_safe_path(candidate), type(env).__name__)
     return validated

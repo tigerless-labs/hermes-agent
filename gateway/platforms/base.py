@@ -667,18 +667,30 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
         cache_fn=cache_image_from_bytes, log_label="Media")
 
 
+# A copy fetched from a terminal sandbox sits alone in its own ``remote_<id>`` folder inside a cache
+# dir, under the sandbox file's own name (``gateway.media_fetch``).
+FETCHED_MEDIA_DIR_PREFIX = "remote_"
+
+
 def _cleanup_cache_dir(cache_dir: Path, max_age_hours: int) -> int:
-    """Delete files in *cache_dir* (and in its per-chat ``chats/<chat>`` dirs) older than
-    *max_age_hours*; return the count removed."""
+    """Delete files in *cache_dir* (and in its per-chat ``chats/<chat>`` dirs, and in the fetched-copy
+    folders of either) older than *max_age_hours*, then the fetched-copy folders left empty; return
+    the count removed."""
     cutoff = time.time() - (max_age_hours * 3600)
     removed = 0
     chats = cache_dir / "chats"
     for directory in (cache_dir, *(d for d in (chats.iterdir() if chats.is_dir() else ()) if d.is_dir())):
-        for f in directory.iterdir():
-            if f.is_file() and f.stat().st_mtime < cutoff:
+        for entry in directory.iterdir():
+            fetched = (entry.name.startswith(FETCHED_MEDIA_DIR_PREFIX) and entry.is_dir()
+                       and not entry.is_symlink())
+            for f in (entry.iterdir() if fetched else (entry,)):
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    with contextlib.suppress(OSError):
+                        f.unlink()
+                        removed += 1
+            if fetched:
                 with contextlib.suppress(OSError):
-                    f.unlink()
-                    removed += 1
+                    entry.rmdir()
     return removed
 
 
