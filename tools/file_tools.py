@@ -418,6 +418,42 @@ def _special_file_kind(path) -> str | None:
                 "a special (non-regular) file")
 
 
+_SANDBOX_PARSE_SECONDS = 120
+
+
+def _documents_parsed_in_sandbox() -> bool:
+    """``security.document_parsing_in_sandbox`` under a non-local backend: the session's sandbox parses documents,
+    so the host never parses their contents."""
+    from tools.terminal_scope import terminal_env
+    if (terminal_env("TERMINAL_ENV") or "local").strip().lower() in ("", "local"):
+        return False
+    try:
+        from hermes_cli.config import load_config
+        from utils import is_truthy_value
+        return is_truthy_value((load_config().get("security") or {}).get("document_parsing_in_sandbox"), default=False)
+    except Exception:
+        return False
+
+
+def _extract_in_sandbox(env, path: str) -> tuple[str, int]:
+    """``(text, size)`` from the engine's own extraction code run inside the sandbox; fails closed."""
+    import shlex
+    from tools import read_extract
+    from tools.read_extract import ExtractionError
+    source = Path(read_extract.__file__).read_text(encoding="utf-8")
+    res = env.execute(f"python3 - {shlex.quote(path)}", stdin_data=source, timeout=_SANDBOX_PARSE_SECONDS)
+    lines = [line for line in (res.get("output") or "").splitlines() if line.strip()]
+    try:
+        answer = json.loads(lines[-1]) if res.get("returncode", 1) == 0 and lines else None
+    except ValueError:
+        answer = None
+    if not isinstance(answer, dict):
+        raise RuntimeError(f"the sandbox could not parse the document ({(lines[0] if lines else '')[:200]})")
+    if "error" in answer:
+        raise ExtractionError(str(answer["error"]))
+    return str(answer["text"]), int(answer["size"])
+
+
 def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task_id: str) -> str | None:
     """Render an extractable document (.docx/.xlsx/.pdf/...) as paginated text.
 
@@ -431,14 +467,22 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
 
     if not is_extractable_document(str(_resolved)):
         return None
-    file_ops = _get_file_ops(task_id)
+    in_sandbox = _documents_parsed_in_sandbox()
     try:
-        binary = file_ops.read_file_bytes(str(_resolved), max_bytes=MAX_DOCUMENT_BYTES)
-        if binary.error or binary.base64_content is None:
-            raise ExtractionError(binary.error or "Document bytes unavailable")
-        document_bytes = base64.b64decode(binary.base64_content, validate=True)
-        extracted_text = extract_document_bytes(document_bytes, str(_resolved))
-    except (ExtractionError, ValueError, base64.binascii.Error) as exc:
+        file_ops = _get_file_ops(task_id)
+        if in_sandbox:
+            extracted_text, file_size = _extract_in_sandbox(file_ops.env, str(_resolved))
+        else:
+            binary = file_ops.read_file_bytes(str(_resolved), max_bytes=MAX_DOCUMENT_BYTES)
+            if binary.error or binary.base64_content is None:
+                raise ExtractionError(binary.error or "Document bytes unavailable")
+            document_bytes = base64.b64decode(binary.base64_content, validate=True)
+            extracted_text, file_size = extract_document_bytes(document_bytes, str(_resolved)), binary.file_size
+    except Exception as exc:
+        if in_sandbox and not isinstance(exc, ExtractionError):
+            return tool_error(f"Cannot read '{path}': {exc}")
+        if not isinstance(exc, (ExtractionError, ValueError, base64.binascii.Error)):
+            raise
         logger.debug("document extraction failed for %s", path, exc_info=True)
         # Binary formats surface the specific failure (fallthrough would only
         # give a generic binary error); .ipynb and byte-transport errors fall through.
@@ -463,7 +507,7 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
     result_dict = {
         "content": file_ops._add_line_numbers(page_text, offset) if page_text else "",
         "total_lines": total_lines,
-        "file_size": binary.file_size,
+        "file_size": file_size,
         "truncated": total_lines > end_line,
         "extracted_document": True}
     if result_dict["truncated"]:
