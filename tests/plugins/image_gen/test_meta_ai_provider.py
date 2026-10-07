@@ -312,3 +312,143 @@ class TestGenerate:
         assert result["success"] is False
         assert result["error_type"] == "api_error"
         assert "boom" in result["error"]
+
+
+# ── Edit (image-to-image) ─────────────────────────────────────────────────────
+
+
+def _data_url(raw: bytes = bytes.fromhex(_PNG_HEX), mime: str = "image/png") -> str:
+    import base64
+
+    return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+
+
+def _edit_body(fake_client: MagicMock) -> dict:
+    call = fake_client.post.call_args
+    assert call.args[0] == "/images/edits"
+    return call.kwargs["body"]
+
+
+class TestEdit:
+    def test_capabilities_advertise_editing_within_metas_input_limit(self, provider):
+        caps = provider.capabilities()
+        assert "image" in caps["modalities"]
+        assert caps["max_reference_images"] + 1 == meta_plugin.MAX_SOURCE_IMAGES
+
+    def test_a_source_image_goes_to_the_edits_endpoint_as_json(self, provider):
+        fake_client = MagicMock()
+        fake_client.post.return_value = {"data": [{"b64_json": _b64_png()}]}
+        source = _data_url()
+
+        with _patched_openai(fake_client):
+            result = provider.generate("make it blue", aspect_ratio="square", image_url=source)
+
+        assert result["success"] is True
+        assert result["modality"] == "image"
+        fake_client.images.generate.assert_not_called()
+        fake_client.images.edit.assert_not_called()
+        body = _edit_body(fake_client)
+        assert body["model"] == meta_plugin.DEFAULT_MODEL
+        assert body["prompt"] == "make it blue"
+        assert body["images"] == [{"image_url": source}]
+        assert body["size"] == meta_plugin.size_for("square")
+        assert Path(result["image"]).read_bytes() == bytes.fromhex(_PNG_HEX)
+
+    def test_the_primary_image_leads_the_references(self, provider):
+        fake_client = MagicMock()
+        fake_client.post.return_value = {"data": [{"b64_json": _b64_png()}]}
+        primary, ref_a, ref_b = _data_url(b"a"), "https://example.com/b.png", _data_url(b"c")
+
+        with _patched_openai(fake_client):
+            provider.generate("compose", image_url=primary, reference_image_urls=[ref_a, ref_b])
+
+        assert _edit_body(fake_client)["images"] == [
+            {"image_url": primary}, {"image_url": ref_a}, {"image_url": ref_b}]
+
+    def test_a_local_file_is_sent_inline(self, provider, tmp_path):
+        local = tmp_path / "photo.jpg"
+        local.write_bytes(b"jpeg-bytes")
+        fake_client = MagicMock()
+        fake_client.post.return_value = {"data": [{"b64_json": _b64_png()}]}
+
+        with _patched_openai(fake_client):
+            provider.generate("sketch it", image_url=str(local))
+
+        assert _edit_body(fake_client)["images"] == [{"image_url": _data_url(b"jpeg-bytes", "image/jpeg")}]
+
+    def test_a_blocked_local_path_is_refused_before_any_request(self, provider):
+        fake_client = MagicMock()
+        with (
+            _patched_openai(fake_client),
+            patch("agent.file_safety.raise_if_read_blocked", side_effect=PermissionError("credential file")),
+        ):
+            result = provider.generate("leak it", image_url="/root/.ssh/id_rsa")
+
+        assert result["success"] is False
+        assert result["error_type"] == "io_error"
+        fake_client.post.assert_not_called()
+        fake_client.images.generate.assert_not_called()
+
+    def test_too_many_sources_are_refused_before_any_request(self, provider):
+        fake_client = MagicMock()
+        refs = [_data_url(bytes([index])) for index in range(meta_plugin.MAX_SOURCE_IMAGES)]
+
+        with _patched_openai(fake_client):
+            result = provider.generate("collage", image_url=_data_url(), reference_image_urls=refs)
+
+        assert result["success"] is False
+        assert result["error_type"] == "too_many_references"
+        fake_client.post.assert_not_called()
+
+    def test_an_edit_error_is_surfaced(self, provider):
+        fake_client = MagicMock()
+        fake_client.post.side_effect = RuntimeError("400 invalid image")
+
+        with _patched_openai(fake_client):
+            result = provider.generate("make it blue", image_url=_data_url())
+
+        assert result["success"] is False
+        assert result["error_type"] == "api_error"
+        assert "invalid image" in result["error"]
+
+    def test_an_edit_without_image_data_is_an_empty_response(self, provider):
+        fake_client = MagicMock()
+        fake_client.post.return_value = {"data": []}
+
+        with _patched_openai(fake_client):
+            result = provider.generate("make it blue", image_url=_data_url())
+
+        assert result["success"] is False
+        assert result["error_type"] == "empty_response"
+
+
+class TestEditShape:
+    def test_an_edit_without_a_requested_ratio_keeps_the_sources_shape(self, provider):
+        fake_client = MagicMock()
+        fake_client.post.return_value = {"data": [{"b64_json": _b64_png()}]}
+
+        with _patched_openai(fake_client):
+            result = provider.generate("make it blue", image_url=_data_url())
+
+        assert result["success"] is True
+        assert "size" not in _edit_body(fake_client)
+
+    def test_an_edit_with_a_requested_ratio_sends_its_size(self, provider):
+        fake_client = MagicMock()
+        fake_client.post.return_value = {"data": [{"b64_json": _b64_png()}]}
+
+        with _patched_openai(fake_client):
+            provider.generate("side by side", aspect_ratio="landscape", image_url=_data_url())
+
+        assert _edit_body(fake_client)["size"] == meta_plugin.size_for("landscape")
+
+    def test_text_to_image_without_a_ratio_uses_the_default(self, provider):
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+
+        with _patched_openai(fake_client):
+            provider.generate("a cat")
+
+        from agent.image_gen_provider import DEFAULT_ASPECT_RATIO
+
+        assert fake_client.images.generate.call_args.kwargs["size"] == meta_plugin.size_for(DEFAULT_ASPECT_RATIO)

@@ -635,11 +635,13 @@ def _declared_controls(provider, controls: Optional[dict[str, Any]]) -> Optional
 
 
 def _dispatch_to_plugin_provider(
-    prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
+    prompt: str, aspect_ratio: Optional[str], image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
     controls: Optional[dict[str, Any]] = None):
     """JSON result from the selected plugin provider, or ``None`` to fall through to in-tree FAL
-    (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``."""
+    (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``.
+    An unasked ``aspect_ratio`` is left out, so a provider's own default applies (an edit may keep
+    its source image's shape)."""
     configured = _plugin_provider_name()
     if configured is None:
         return None
@@ -660,7 +662,9 @@ def _dispatch_to_plugin_provider(
             f"image_gen.provider='{configured}' is set but no plugin registered that name. "
             f"Run `hermes plugins list` to see available image gen backends.", "provider_not_registered")
     pname = getattr(provider, "name", "?")
-    kwargs: dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
+    kwargs: dict[str, Any] = {"prompt": prompt}
+    if aspect_ratio:
+        kwargs["aspect_ratio"] = aspect_ratio
     try:
         _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
                              model=_read_configured_image_model(), controls=_declared_controls(provider, controls))
@@ -771,7 +775,8 @@ def _handle_image_generate(args, **kw):
     prompt = args.get("prompt", "")
     if not prompt:
         return tool_error("prompt is required for image generation")
-    aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    requested_aspect = args.get("aspect_ratio")
+    aspect_ratio = requested_aspect or DEFAULT_ASPECT_RATIO
     upscale = args.get("upscale")
     task_id = kw.get("task_id")
     # Confinement chokepoint BEFORE any dispatch: every route receives sandbox-confined bytes.
@@ -784,7 +789,7 @@ def _handle_image_generate(args, **kw):
     sources = dict(image_url=image_url, reference_image_urls=reference_image_urls,
                    upscale=upscale if isinstance(upscale, bool) else None)
     controls = {name: args[name] for name in _CREATIVE_CONTROL_PARAMS if name in args}
-    raw = _dispatch_to_plugin_provider(prompt, aspect_ratio, controls=controls or None, **sources)
+    raw = _dispatch_to_plugin_provider(prompt, requested_aspect, controls=controls or None, **sources)
     if raw is None:
         raw = _maybe_route_managed_model(prompt, aspect_ratio, controls=controls or None, **sources)
         if raw is not None:
