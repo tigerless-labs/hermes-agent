@@ -717,6 +717,10 @@ def _dispatch_bridge_tool(function_name: str, function_args: Dict[str, Any],
         return None
     if not ts.is_bridge_tool(function_name):
         return None
+    # Bridge switched off: a plugin may own a tool of the same name (e.g. a client-executed
+    # tool search answering the Responses API), so the call goes to the registry like any other.
+    if ts.load_config_readonly().enabled == "off":
+        return None
     # Un-collapsed catalog scoped to the session's toolsets, so a restricted
     # session (subagent, kanban worker) can't reach the whole registry via the bridge.
     try:
