@@ -8,6 +8,7 @@ media delivery refuses them, and a session outside any chat mounts no cache at a
 
 from __future__ import annotations
 
+import base64
 import os
 import time
 from pathlib import Path
@@ -179,3 +180,43 @@ def test_the_memory_partition_and_the_cache_scope_name_a_chat_the_same_way(home:
     monkeypatch.setattr(memory_tool, "get_memory_dir", lambda: home / "memories")
     partition = memory_tool.memory_partition({"partition_by_chat": True}, "slack", "C1", "group")
     assert partition.directory.name == chat_scope_slug("slack", "C1")
+
+
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+
+
+def _image_in_chat_cache(platform: str, chat_id: str, name: str) -> Path:
+    with _Chat(platform, chat_id):
+        path = get_hermes_dir("cache/images", "image_cache") / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_PNG)
+    return path
+
+
+@pytest.mark.asyncio
+async def test_vision_reads_only_the_current_chats_cache_off_the_host(home: Path, scoped: None,
+                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    import tools.image_source as image_source
+
+    mine, theirs = _image_in_chat_cache("slack", "C1", "mine.png"), _image_in_chat_cache("slack", "C2", "theirs.png")
+    monkeypatch.setattr(image_source, "_get_active_env", lambda task_id: None)
+    monkeypatch.setattr(image_source, "_ensure_container_env", lambda task_id: None)
+    with _Chat("slack", "C1"):
+        read = await image_source.resolve_image_source(str(mine), image_source.ResolveContext(task_id="t1"))
+        assert read.origin == "file" and read.data == _PNG
+        with pytest.raises(image_source.SourceNotFound):
+            await image_source.resolve_image_source(str(theirs), image_source.ResolveContext(task_id="t1"))
+    with pytest.raises(image_source.SourceNotFound):
+        await image_source.resolve_image_source(str(mine), image_source.ResolveContext(task_id="t1"))
+
+
+def test_delivery_and_vision_narrow_the_caches_by_the_same_rule(home: Path, scoped: None) -> None:
+    from gateway.platforms import base
+    from hermes_constants import chat_scoped_roots
+
+    roots = [home / "cache" / "images", home / "cache" / "documents"]
+    with _Chat("slack", "C1"):
+        assert chat_scoped_roots(roots) == [root / "chats" / chat_scope_slug("slack", "C1") for root in roots]
+        assert base._chat_scoped_cache_roots is chat_scoped_roots
+    assert chat_scoped_roots(roots) == []
