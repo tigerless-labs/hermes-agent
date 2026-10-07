@@ -511,8 +511,10 @@ def _publish_runtime_main(agent: Any) -> None:
 def _refresh_mcp_tools_between_turns(agent: Any) -> None:
     """Late-connecting MCP servers land in THIS turn's snapshot, before the first API
     call assembles ``tools=``. ``preserve_prefix`` keeps the tool array append-only so a
-    flapping ``check_fn`` can't fork the cache."""
+    flapping ``check_fn`` can't fork the cache. Tools a plugin registered or dropped since
+    the snapshot (the registry generation moved past it) land the same way."""
     try:
+        _refresh_tools_after_registry_change(agent)
         # An authorization that committed after its connection card closed: same import-cost gate,
         # the module is loaded only in a process that ran a connection operation.
         if "tools.connectors.mcp" in sys.modules:
@@ -527,6 +529,16 @@ def _refresh_mcp_tools_between_turns(agent: Any) -> None:
                 refresh_agent_mcp_tools(agent, quiet_mode=True, preserve_prefix=True)
     except Exception:
         logger.debug("between-turns MCP tool refresh skipped", exc_info=True)
+
+
+def _refresh_tools_after_registry_change(agent: Any) -> None:
+    if getattr(agent, "_skip_mcp_refresh", False):
+        return
+    from tools.registry import registry
+    published = getattr(agent, "_tool_snapshot_generation", None)
+    if isinstance(published, int) and registry._generation > published:
+        from tools.mcp_tool_agent import refresh_agent_mcp_tools
+        refresh_agent_mcp_tools(agent, quiet_mode=True, preserve_prefix=True, content_aware=True)
 
 
 def _bind_turn_identity(
