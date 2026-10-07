@@ -1494,6 +1494,10 @@ def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | 
     reasoning_config = _reasoning_config_for_wire(agent)
     if tools_for_api is None:
         tools_for_api = agent.tools
+    if agent.api_mode != "codex_responses":
+        # Only the Responses transport declares deferred tools natively; elsewhere they load plainly.
+        from agent.responses_tool_search import plain_tools
+        tools_for_api = plain_tools(tools_for_api, api_messages)
     # The one place request_overrides are consumed: static /fast values are already pinned
     # in agent.request_overrides; auto/cold windows layer the fast override per request.
     request_overrides = effective_request_overrides(agent)

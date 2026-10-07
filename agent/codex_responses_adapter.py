@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Ty
 
 from agent.message_sanitization import coerce_tool_name, deterministic_call_id
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+from agent.responses_tool_search import CLIENT_EXECUTION, WIRE_SEARCH_NAME, ToolWire, plain_tools
 from hermes_cli.route_identity import normalize_route_base_url
 
 logger = logging.getLogger(__name__)
@@ -342,7 +343,15 @@ def _derive_responses_function_call_id(call_id: str, response_item_id: Optional[
 # --- Schema conversion --------------------------------------------------------
 
 def _responses_tools(tools: Optional[List[Dict[str, Any]]] = None) -> Optional[List[Dict[str, Any]]]:
-    """Convert chat-completions tool schemas to Responses function-tool schemas."""
+    """Convert chat-completions tool schemas to Responses tool schemas: a plugin's tool-search marks
+    become a client ``tool_search`` and deferred namespaces (see ``agent.responses_tool_search``)."""
+    wire = ToolWire.of(tools)
+    if wire.native:
+        return wire.declarations(tools or [], _responses_function_tools) or None
+    return _responses_function_tools(plain_tools(tools, []))
+
+
+def _responses_function_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
     fns = [item.get("function", {}) if isinstance(item, dict) else {} for item in tools or []]
     converted = [
         {
@@ -496,8 +505,10 @@ class _WireCallIds:
 
 def _replay_tool_call_items(
     msg: Dict[str, Any], *, start_index: int, wire_ids: Optional[_WireCallIds] = None,
+    tool_wire: Optional[ToolWire] = None,
 ) -> List[Dict[str, Any]]:
-    """Convert an assistant message's ``tool_calls`` into ``function_call`` items."""
+    """Convert an assistant message's ``tool_calls`` into ``function_call`` items (a call to the
+    plugin's search tool into the ``tool_search_call`` the model made)."""
     replayed: List[Dict[str, Any]] = []
     for tc in _as_list(msg.get("tool_calls")):
         if not isinstance(tc, dict):
@@ -508,16 +519,38 @@ def _replay_tool_call_items(
             continue
         index = start_index + len(replayed)
         call_id = _resolve_call_id(tc.get("call_id"), tc.get("id"), fn_name, str(arguments), index, canonicalize_fc=True)
+        wire_call_id = wire_ids.for_call(call_id) if wire_ids else _clamp_responses_call_id(call_id)
+        if tool_wire is not None and tool_wire.is_search(fn_name):
+            replayed.append({
+                "type": "tool_search_call", "call_id": wire_call_id, "execution": CLIENT_EXECUTION,
+                "status": "completed", "arguments": _search_arguments(arguments),
+            })
+            continue
         replayed.append({
-            "type": "function_call",
-            "call_id": wire_ids.for_call(call_id) if wire_ids else _clamp_responses_call_id(call_id),
-            "name": coerce_tool_name(fn_name, fallback="fn"), "arguments": _coerce_arguments(arguments),
+            "type": "function_call", "call_id": wire_call_id,
+            "name": tool_wire.wire_name(fn_name) if tool_wire is not None and fn_name in tool_wire.deferred
+            else coerce_tool_name(fn_name, fallback="fn"),
+            "arguments": _coerce_arguments(arguments),
         })
     return replayed
 
 
-def _tool_output_items(msg: Dict[str, Any], *, wire_ids: Optional[_WireCallIds] = None) -> List[Dict[str, Any]]:
-    """Convert a tool-role message to ``[function_call_output]`` (``[]`` if unpairable)."""
+def _search_arguments(arguments: Any) -> Dict[str, Any]:
+    if isinstance(arguments, dict):
+        return arguments
+    try:
+        parsed = json.loads(arguments) if isinstance(arguments, str) else None
+    except ValueError:
+        parsed = None
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _tool_output_items(
+    msg: Dict[str, Any], *, wire_ids: Optional[_WireCallIds] = None, tool_wire: Optional[ToolWire] = None,
+    search_call_ids: frozenset = frozenset(),
+) -> List[Dict[str, Any]]:
+    """Convert a tool-role message to ``[function_call_output]`` (``[]`` if unpairable), or to the
+    ``tool_search_output`` answering a replayed ``tool_search_call``."""
     raw_tool_call_id = msg.get("tool_call_id")
     call_id, tool_response_item_id = _split_responses_tool_id(raw_tool_call_id)
     if not _nonblank(call_id):
@@ -533,6 +566,9 @@ def _tool_output_items(msg: Dict[str, Any], *, wire_ids: Optional[_WireCallIds] 
     is_parts = isinstance(tool_content, list)
     output_value: Any = (_chat_content_to_responses_parts(tool_content) or "") if is_parts else str(tool_content or "")
     wire_call_id = wire_ids.for_output(call_id) if wire_ids else _clamp_responses_call_id(call_id)
+    if tool_wire is not None and wire_call_id in search_call_ids:
+        return [{"type": "tool_search_output", "call_id": wire_call_id, "execution": CLIENT_EXECUTION,
+                 "status": "completed", "tools": tool_wire.found(tool_content)}]
     return [{"type": "function_call_output", "call_id": wire_call_id, "output": output_value}]
 
 
@@ -540,8 +576,12 @@ def _chat_messages_to_responses_input(
     messages: List[Dict[str, Any]], *, is_xai_responses: bool = False, is_github_responses: bool = False,
     replay_encrypted_reasoning: bool = True, current_issuer_kind: Optional[str] = None,
     current_issuer_model: Optional[str] = None, native_compaction_eligible: bool = False,
+    tool_wire: Optional[ToolWire] = None,
 ) -> List[Dict[str, Any]]:
     """Convert internal chat-style messages to Responses input items.
+
+    ``tool_wire``: the tool-search declarations of THIS request; calls to the plugin's search tool and
+    their results replay as ``tool_search_call`` / ``tool_search_output``, namespaced calls by dotted name.
 
     ``is_xai_responses``: signature compatibility only (xAI DOES replay encrypted reasoning).
     ``replay_encrypted_reasoning``: per-session kill switch, threaded False by
@@ -587,6 +627,7 @@ def _chat_messages_to_responses_input(
     item_sources: List[Optional[Dict[str, Any]]] = []
     seen_item_ids: set = set()
     wire_ids = _WireCallIds()
+    search_call_ids: set = set()
     # The ChatGPT Codex backend rejects a role message whose ``content`` is a plain string with
     # ``{"detail": "Unsupported content type"}`` (400) — even a single user turn with no replay state
     # (#51512). It accepts only typed parts, so string text goes out as ``input_text``/``output_text``
@@ -600,7 +641,8 @@ def _chat_messages_to_responses_input(
             continue
         role = msg.get("role")
         if role == "tool":
-            emit(_tool_output_items(msg, wire_ids=wire_ids), msg)
+            emit(_tool_output_items(msg, wire_ids=wire_ids, tool_wire=tool_wire,
+                                    search_call_ids=frozenset(search_call_ids)), msg)
             continue
         if role not in {"user", "assistant"}:
             continue
@@ -628,7 +670,10 @@ def _chat_messages_to_responses_input(
         fallback = None
         if not message_items:
             fallback = content_parts or (content_text if content_text.strip() else "" if reasoning_items else None)
-        tool_items = _replay_tool_call_items(msg, start_index=len(items) + (fallback is not None), wire_ids=wire_ids)
+        tool_items = _replay_tool_call_items(
+            msg, start_index=len(items) + (fallback is not None), wire_ids=wire_ids, tool_wire=tool_wire,
+        )
+        search_call_ids.update(item["call_id"] for item in tool_items if item["type"] == "tool_search_call")
         # A function_call already follows its reasoning. Inventing an empty assistant
         # message between them changes the replayed turn (Muse can emit corrupt finals).
         # Keep a follower only for reasoning with no other following item, and make it
@@ -749,6 +794,7 @@ def estimate_native_responses_preflight_tokens(
 
 _PreflightCtx = NamedTuple("_PreflightCtx", [
     ("sanitize_text", Callable[[str], str]), ("sanitize_harmony_tokens", bool), ("is_github_responses", bool), ("seen_ids", set),
+    ("namespaced_names", frozenset),
 ])
 
 
@@ -759,8 +805,24 @@ def _preflight_function_call(item: Dict[str, Any], idx: int, ctx: _PreflightCtx)
     if not _nonblank(name):
         raise ValueError(f"Codex Responses input[{idx}] function_call is missing name.")
     return {
-        "type": "function_call", "call_id": call_id.strip(), "name": coerce_tool_name(name, fallback="fn"),
+        "type": "function_call", "call_id": call_id.strip(),
+        "name": name if name in ctx.namespaced_names else coerce_tool_name(name, fallback="fn"),
         "arguments": ctx.sanitize_text(_coerce_arguments(item.get("arguments", "{}"))),
+    }
+
+
+def _preflight_tool_search_item(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Dict[str, Any]:
+    item_type, call_id = item["type"], item.get("call_id")
+    if not _nonblank(call_id):
+        raise ValueError(f"Codex Responses input[{idx}] {item_type} is missing call_id.")
+    payload_key, expected = ("arguments", dict) if item_type == "tool_search_call" else ("tools", list)
+    payload = item.get(payload_key)
+    if not isinstance(payload, expected):
+        raise ValueError(f"Codex Responses input[{idx}] {item_type} has invalid {payload_key}.")
+    return {
+        "type": item_type, "call_id": call_id.strip(), "execution": _str_or_empty(item.get("execution")) or CLIENT_EXECUTION,
+        "status": _str_or_empty(item.get("status")) or "completed",
+        payload_key: _neutralize_harmony_structure(payload) if ctx.sanitize_harmony_tokens else payload,
     }
 
 
@@ -861,16 +923,19 @@ def _preflight_role_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) 
 _PREFLIGHT_ITEM_HANDLERS: Dict[str, Callable[..., Optional[Dict[str, Any]]]] = {
     "function_call": _preflight_function_call, "function_call_output": _preflight_function_call_output,
     "reasoning": _preflight_encrypted, "compaction": _preflight_encrypted, "message": _preflight_message,
+    "tool_search_call": _preflight_tool_search_item, "tool_search_output": _preflight_tool_search_item,
 }
 
 
 def _preflight_codex_input_items(
     raw_items: Any, *, is_github_responses: bool = False, sanitize_harmony_tokens: bool = False,
+    namespaced_names: frozenset = frozenset(),
 ) -> List[Dict[str, Any]]:
+    """``namespaced_names``: ``<namespace>.<function>`` names this request declares; calls keep them verbatim."""
     if not isinstance(raw_items, list):
         raise ValueError("Codex Responses input must be a list of input items.")
     sanitize_text = _neutralize_harmony_tokens if sanitize_harmony_tokens else (lambda text: text)
-    ctx = _PreflightCtx(sanitize_text, sanitize_harmony_tokens, is_github_responses, set())
+    ctx = _PreflightCtx(sanitize_text, sanitize_harmony_tokens, is_github_responses, set(), namespaced_names)
     normalized: List[Dict[str, Any]] = []
     for idx, item in enumerate(raw_items):
         if not isinstance(item, dict):
@@ -889,16 +954,53 @@ def _preflight_tool(tool: Any, idx: int) -> Dict[str, Any]:
     tool_type = tool.get("type")
     if tool_type in _RESPONSES_BUILTIN_TOOL_TYPES:  # provider-executed built-ins carry no name/parameters
         return dict(tool)
+    if tool_type == "tool_search":
+        return _preflight_tool_search(tool, idx)
+    if tool_type == "namespace":
+        return _preflight_namespace(tool, idx)
     if tool_type != "function":
         raise ValueError(f"Codex Responses tools[{idx}] has unsupported type {tool.get('type')!r}.")
     name, parameters = tool.get("name"), tool.get("parameters")
     for ok, what in ((_nonblank(name), "a valid name"), (isinstance(parameters, dict), "valid parameters")):
         if not ok:
             raise ValueError(f"Codex Responses tools[{idx}] is missing {what}.")
+    if tool.get("defer_loading") is True:
+        deferred: Dict[str, Any] = {"type": "function", "name": name.strip()}
+        if _nonblank(tool.get("description")):
+            deferred["description"] = tool["description"]
+        return {**deferred, "parameters": parameters, "defer_loading": True}
     return {
         "type": "function", "name": name.strip(), "description": _str_or_empty(tool.get("description", "")),
         "strict": bool(tool.get("strict", False)), "parameters": parameters,
     }
+
+
+def _preflight_tool_search(tool: Dict[str, Any], idx: int) -> Dict[str, Any]:
+    if tool.get("execution") != CLIENT_EXECUTION:
+        return dict(tool)
+    if not isinstance(tool.get("parameters"), dict):
+        raise ValueError(f"Codex Responses tools[{idx}] tool_search is missing valid parameters.")
+    return {"type": "tool_search", "execution": CLIENT_EXECUTION, "description": _str_or_empty(tool.get("description")),
+            "parameters": tool["parameters"]}
+
+
+def _preflight_namespace(tool: Dict[str, Any], idx: int) -> Dict[str, Any]:
+    name, functions = tool.get("name"), tool.get("tools")
+    if not _nonblank(name) or not isinstance(functions, list) or not functions:
+        raise ValueError(f"Codex Responses tools[{idx}] namespace needs a name and its tools.")
+    checked = [_preflight_tool(function, idx) for function in functions]
+    if any(function["type"] != "function" for function in checked):
+        raise ValueError(f"Codex Responses tools[{idx}] namespace may hold only functions.")
+    return {"type": "namespace", "name": name.strip(), "description": _str_or_empty(tool.get("description")),
+            "tools": checked}
+
+
+def _namespaced_function_names(tools: Any) -> frozenset:
+    return frozenset(
+        f"{tool['name']}.{function['name']}"
+        for tool in tools if isinstance(tool, dict) and tool.get("type") == "namespace" and isinstance(tool.get("tools"), list)
+        for function in tool["tools"] if isinstance(function, dict) and isinstance(function.get("name"), str)
+    ) if isinstance(tools, list) else frozenset()
 
 
 # Optional scalar request fields, in wire order: (key, accept(value), coerce). Values
@@ -950,6 +1052,7 @@ def _preflight_codex_api_kwargs(
         instructions = _neutralize_harmony_tokens(instructions)
     input_items = _preflight_codex_input_items(
         api_kwargs.get("input"), is_github_responses=is_github_responses, sanitize_harmony_tokens=sanitize_harmony_tokens,
+        namespaced_names=_namespaced_function_names(api_kwargs.get("tools")),
     )
     normalized: Dict[str, Any] = {
         "model": model.strip(), "instructions": instructions, "input": input_items, "store": False,
@@ -1041,10 +1144,18 @@ def _format_responses_error(error_obj: Any, response_status: str) -> str:
 
 # --- Full response normalization ----------------------------------------------
 
-def _response_tool_call(item: Any, item_type: str, index: int) -> SimpleNamespace:
-    """Build a chat-style tool_call from a ``function_call``/``custom_tool_call`` item."""
+def _called_name(item: Any, item_type: str) -> str:
+    if item_type == "tool_search_call":
+        return WIRE_SEARCH_NAME
     fn_name = getattr(item, "name", "") or ""
-    arguments = getattr(item, "arguments" if item_type == "function_call" else "input", "{}")
+    namespace = getattr(item, "namespace", None)
+    return f"{namespace}.{fn_name}" if _nonblank(namespace) and fn_name else fn_name
+
+
+def _response_tool_call(item: Any, item_type: str, index: int) -> SimpleNamespace:
+    """Build a chat-style tool_call from a ``function_call``/``custom_tool_call``/client ``tool_search_call`` item."""
+    fn_name = _called_name(item, item_type)
+    arguments = getattr(item, "input" if item_type == "custom_tool_call" else "arguments", "{}")
     if not isinstance(arguments, str):
         arguments = json.dumps(arguments, ensure_ascii=False)
     raw_item_id = getattr(item, "id", None)
@@ -1119,6 +1230,9 @@ class _OutputScan:
                             "Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]),
                         )
             elif item_type == "custom_tool_call" or (item_type == "function_call" and item_status not in _INCOMPLETE_STATUSES):
+                self.tool_calls.append(_response_tool_call(item, item_type, len(self.tool_calls)))
+            elif (item_type == "tool_search_call" and getattr(item, "execution", None) == CLIENT_EXECUTION
+                  and item_status not in _INCOMPLETE_STATUSES):
                 self.tool_calls.append(_response_tool_call(item, item_type, len(self.tool_calls)))
 
     def _message(self, item: Any, item_status: Optional[str]) -> None:
