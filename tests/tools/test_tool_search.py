@@ -886,3 +886,48 @@ class TestDeferredCallSchemaProbe:
         }, calls)
 
         assert validate_deferred_call_args(name, {"payload": {"anything": True}}) is None
+
+
+class TestBridgeOnlyWhenOn:
+    """With the bridge switched off, a plugin's own tool named tool_search is an ordinary tool."""
+
+    @staticmethod
+    def _registered_search(monkeypatch):
+        from tools.registry import registry
+
+        schema = {"name": "tool_search", "description": "Load tools by name.",
+                  "parameters": {"type": "object", "properties": {"names": {"type": "array"}}}}
+        registry.register(name="tool_search", toolset="plugin_search", schema=schema,
+                          handler=lambda args, **kwargs: json.dumps({"loaded": args.get("names")}))
+        monkeypatch.setattr("tools.tool_search.dispatch_tool_search",
+                            lambda *args, **kwargs: json.dumps({"bridge": True}))
+        return registry
+
+    def _call(self):
+        import model_tools
+
+        return json.loads(model_tools.handle_function_call(
+            function_name="tool_search", function_args={"names": ["notes.read_note"]},
+            session_id="s", task_id="t", turn_id="u", api_request_id="r", tool_call_id="c"))
+
+    def test_a_plugins_tool_search_runs_when_the_bridge_is_off(self, monkeypatch):
+        from tools import tool_search
+
+        registry = self._registered_search(monkeypatch)
+        monkeypatch.setattr(tool_search, "load_config_readonly",
+                            lambda: tool_search.ToolSearchConfig.from_raw({"enabled": "off"}))
+        try:
+            assert self._call() == {"loaded": ["notes.read_note"]}
+        finally:
+            registry.deregister("tool_search")
+
+    def test_the_bridge_answers_tool_search_while_it_is_on(self, monkeypatch):
+        from tools import tool_search
+
+        registry = self._registered_search(monkeypatch)
+        monkeypatch.setattr(tool_search, "load_config_readonly",
+                            lambda: tool_search.ToolSearchConfig.from_raw({"enabled": "on"}))
+        try:
+            assert self._call() == {"bridge": True}
+        finally:
+            registry.deregister("tool_search")
