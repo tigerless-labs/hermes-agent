@@ -38,12 +38,25 @@ logger = logging.getLogger(__name__)
 # Availability check
 # ---------------------------------------------------------------------------
 
+def _vault_switched_on() -> bool:
+    """``browser.credential_vault`` (default on). Off keeps every vault tool from the model — for a gateway
+    shared by people who must not fill each other's saved logins."""
+    try:
+        from hermes_cli.config import load_config
+        from utils import is_truthy_value
+        return is_truthy_value((load_config().get("browser") or {}).get("credential_vault"), default=True)
+    except Exception:
+        return True
+
+
 def _check_vault_available() -> bool:
     """Schema-gate: the vault tools ride with the browser. An empty vault still needs
     browser_vault_save_login so the agent can offer to remember a login the first time it meets a
     form; hiding the tools until an item exists meant nobody ever discovered the feature."""
     from tools.browser_tool_install import check_browser_requirements
     from tools.browser_use_cli import is_browser_use_cli_mode
+    if not _vault_switched_on():
+        return False
     # check_browser_requirements() is False by design in Browser Use mode (browser_exec replaces the
     # built-in surface); the vault serves both stacks.
     return bool(is_browser_use_cli_mode() or check_browser_requirements())

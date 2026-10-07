@@ -654,12 +654,33 @@ def _is_image_url(ref: str) -> bool:
     return ref.startswith(("http://", "https://", "data:image/"))
 
 
-def _build_child_goal_message(goal: str, images: List[str], child) -> Any:
+def _sandboxed_backend() -> bool:
+    from tools.terminal_scope import terminal_env
+    return (terminal_env("TERMINAL_ENV") or "local").strip().lower() not in ("", "local")
+
+
+def _confined_image_urls(paths: List[str], task_id: Optional[str]) -> tuple[List[str], List[str]]:
+    """``(data_urls, skipped)`` for local image paths read the way vision reads them under a non-local backend —
+    the chat's cache or the session's own sandbox, never a model-supplied path off the host."""
+    from model_tools import _run_async
+    from tools.image_source import ImageResolutionError, resolve_local_source_to_data_url
+    urls: List[str] = []
+    skipped: List[str] = []
+    for path in paths:
+        try:
+            urls.append(_run_async(resolve_local_source_to_data_url(path, task_id)))
+        except ImageResolutionError:
+            skipped.append(path)
+    return urls, skipped
+
+
+def _build_child_goal_message(goal: str, images: List[str], child, task_id: Optional[str] = None) -> Any:
     """The child's first user message when a task forwards ``images``.
 
     Routing reuses the inbound-image policy (``agent.image_routing``, honouring ``agent.image_input_mode``): a
     vision-capable child gets an OpenAI-style content list (text part + one ``image_url`` part per image; local files
-    as data URLs behind the read guard, http(s)/data URLs verbatim); otherwise the goal gains ``[Image attached …]``
+    as data URLs behind the read guard — under a sandbox backend read the way vision reads them, with the parent's
+    ``task_id`` — http(s)/data URLs verbatim); otherwise the goal gains ``[Image attached …]``
     hint lines for ``vision_analyze``. Any failure degrades to the text-only goal so image plumbing never breaks a
     spawn — logged at warning since the caller asked for the images.
     """
@@ -678,7 +699,12 @@ def _build_child_goal_message(goal: str, images: List[str], child) -> Any:
             requested_provider=str(getattr(child, "requested_provider", "") or ""),
         )
         if mode == "native":
+            confined_skipped: List[str] = []
+            if _sandboxed_backend():
+                confined, confined_skipped = _confined_image_urls(paths, task_id)
+                data_urls, paths = data_urls + confined, []
             parts, skipped = build_native_content_parts(goal, paths, urls)
+            skipped += confined_skipped
             if skipped:
                 logger.warning("delegate_task: skipped %d unreadable image(s) for subagent: %s", len(skipped), ", ".join(skipped[:3]))
             if data_urls:
@@ -849,7 +875,8 @@ class _ChildRun:
         worker_thread_holder: Dict[str, Optional[threading.Thread]] = {"t": None}
         # Resolved after seed_workspace so a multimodal goal's text part carries the worktree note too.
         _images = list(getattr(child, "_delegate_images", None) or [])
-        user_message: Any = _build_child_goal_message(self.goal, _images, child) if _images else self.goal
+        user_message: Any = (_build_child_goal_message(self.goal, _images, child, task_id=self.parent_task_id)
+                             if _images else self.goal)
 
         def _run_with_thread_capture():
             worker_thread_holder["t"] = threading.current_thread()

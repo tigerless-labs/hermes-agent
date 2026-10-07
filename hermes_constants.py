@@ -467,6 +467,16 @@ def current_chat_cache_scope() -> str | None:
     return chat_scope_slug(platform, chat_id) if platform and chat_id else ""
 
 
+def chat_scoped_roots(roots) -> list[Path]:
+    """With ``terminal.docker_cache_scope: chat`` each cache root narrows to the current chat's ``chats/<chat>``
+    dir (none outside a chat); shared caches keep the roots. The one rule every host-side reader of the caches
+    (media delivery, vision) applies."""
+    scope = current_chat_cache_scope()
+    if scope is None:
+        return [Path(root) for root in roots]
+    return [Path(root) / "chats" / scope for root in roots] if scope else []
+
+
 def get_hermes_dir(new_subpath: str, old_name: str, *, home: Path | None = None, chat_scoped: bool = True) -> Path:
     """Resolve a Hermes subdirectory, honouring a populated legacy ``<old_name>/`` (no migration).
 

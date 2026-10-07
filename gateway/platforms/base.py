@@ -875,14 +875,7 @@ def _media_delivery_allowed_roots() -> List[Path]:
             *_kanban_attachment_roots(), *operator_roots]
 
 
-def _chat_scoped_cache_roots(roots: List[Path]) -> List[Path]:
-    """With ``terminal.docker_cache_scope: chat`` a cache root only allows the current chat's
-    ``chats/<chat>`` dir (none outside a chat); shared caches keep the roots unchanged."""
-    from hermes_constants import current_chat_cache_scope
-    scope = current_chat_cache_scope()
-    if scope is None:
-        return roots
-    return [root / "chats" / scope for root in roots] if scope else []
+from hermes_constants import chat_scoped_roots as _chat_scoped_cache_roots  # noqa: E402 — one rule with vision
 
 
 def _media_delivery_recency_seconds() -> float:

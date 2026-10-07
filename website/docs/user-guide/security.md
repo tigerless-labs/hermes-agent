@@ -765,6 +765,20 @@ SSRF protection is always active for internet-facing use and DNS failures are tr
 
 The same guard covers fetches whose URL comes from a remote party rather than from you: image/video URLs returned by a generation provider, reference-image URLs a model supplies for edits, pet spritesheets and the petdex manifest, and skills.sh sitemap entries. A provider or index that points one of those at a private or metadata address is refused before any connection opens; the operator's own provider `base_url` is not affected — a download fetched directly from your configured `base_url` (the OpenRouter video content endpoint) skips only the private-address class check on that first hop, while the cloud-metadata floor still applies and any redirect it issues is re-validated in full — and an image-generation provider hosted on your LAN needs `security.allow_private_urls: true` (below) for the *result* URLs it returns to be cached locally.
 
+#### Downloading media inside the sandbox
+
+Under a non-local terminal backend, the host still downloads the http(s) media URLs a model hands to vision or
+to image generation as a reference. To keep the host from fetching model-supplied URLs at all, download them inside
+the session's own sandbox instead, where its network policy applies:
+
+```yaml
+security:
+  media_downloads_in_sandbox: true   # default: false
+```
+
+The website policy and the private-address check still run on the host first; without an active sandbox the
+download fails rather than falling back to the host.
+
 #### Intentionally allowing private URLs
 
 Some setups legitimately need private/internal URL access — home networks that resolve `home.arpa` to RFC 1918 space, LAN-only Ollama/llama.cpp endpoints, internal wikis, cloud metadata debugging, and the like. For those cases there's a global opt-out:

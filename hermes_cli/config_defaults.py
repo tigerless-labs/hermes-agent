@@ -427,6 +427,9 @@ DEFAULT_CONFIG = {
         "auto_local_for_private_urls": True,
         # A failed cloud-provider session falls back to local Chromium; false makes it an error instead
         "cloud_fallback_to_local": True,
+        # Offer the credential vault tools (browser_vault_*) with the browser. false keeps them from the model on a
+        # gateway shared by people who must not fill each other's saved logins.
+        "credential_vault": True,
         "cdp_url": "",  # persistent CDP endpoint for attaching to an existing Chromium/Chrome
         # Consent to browse with the user's REAL logins locally: runs on a Hermes-managed SNAPSHOT
         # of the ACTIVE default-Chromium profile (Local State -> profile.last_used; cookies, logins,
@@ -1752,6 +1755,9 @@ DEFAULT_CONFIG = {
     },
     "security": {  # Security: pre-exec scanning via tirith plus related guards.
         "allow_private_urls": False,  # allow requests to private/internal IPs (OpenWrt, VPNs)
+        # Under a non-local terminal backend, download model-supplied media URLs (vision, generation references)
+        # inside the session's own sandbox instead of on the host, so the host never fetches them.
+        "media_downloads_in_sandbox": False,
         # CIDR blocks a local TUN proxy answers DNS with (Mihomo/Clash fake-ip, Surge enhanced).
         # Answers inside these blocks are the proxy's sentinels, not internal hosts, so the guard
         # dials them instead of rejecting them as private. Empty = normal private-address verdict.

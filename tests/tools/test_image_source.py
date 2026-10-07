@@ -590,3 +590,87 @@ class TestHeicDetection:
         path, mime, err = vt._normalize_to_supported_image(broken, "image/avif")
         assert path is None
         assert "AV1" in err or "Pillow" in err
+
+
+class TestSandboxDownloads:
+    """``security.media_downloads_in_sandbox``: under a non-local backend an http(s) media source is
+    downloaded inside the session's own sandbox, so the host never fetches a model-supplied URL."""
+
+    @staticmethod
+    def _on(enabled=True):
+        return patch("hermes_cli.config.load_config",
+                     return_value={"security": {"media_downloads_in_sandbox": enabled}})
+
+    @pytest.mark.asyncio
+    async def test_the_url_is_fetched_in_the_sandbox_and_never_on_the_host(self, tmp_path, monkeypatch):
+        isrc = _reload(monkeypatch, tmp_path / "hermes")
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        commands = []
+
+        def execute(cmd, **kw):
+            commands.append(cmd)
+            return {"returncode": 0, "output": base64.b64encode(PNG).decode()}
+
+        async def host_download(url):
+            raise AssertionError("the host fetched the URL")
+
+        with self._on(), patch("tools.image_source._http_block_reason", return_value=None), \
+                patch("tools.image_source._download_to_bytes", host_download), \
+                patch("tools.image_source._get_active_env", return_value=SimpleNamespace(execute=execute)):
+            res = await isrc.resolve_image_source("https://example.com/a.png?x=1&y=$(id)",
+                                                  isrc.ResolveContext(task_id="t1"))
+        assert res.data == PNG and res.origin == "http"
+        [cmd] = commands
+        assert "'https://example.com/a.png?x=1&y=$(id)'" in cmd
+        assert "--proto =http,https" in cmd and "--max-filesize" in cmd and "head -c" in cmd
+
+    @pytest.mark.asyncio
+    async def test_without_a_sandbox_the_download_fails_closed(self, tmp_path, monkeypatch):
+        isrc = _reload(monkeypatch, tmp_path / "hermes")
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+
+        async def host_download(url):
+            raise AssertionError("the host fetched the URL")
+
+        with self._on(), patch("tools.image_source._http_block_reason", return_value=None), \
+                patch("tools.image_source._download_to_bytes", host_download), \
+                patch("tools.image_source._get_active_env", return_value=None):
+            with pytest.raises(isrc.SourceNotFound):
+                await isrc.resolve_image_source("https://example.com/a.png", isrc.ResolveContext(task_id="t1"))
+
+    @pytest.mark.asyncio
+    async def test_a_failed_sandbox_download_is_an_error(self, tmp_path, monkeypatch):
+        isrc = _reload(monkeypatch, tmp_path / "hermes")
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        failed = SimpleNamespace(execute=lambda cmd, **kw: {"returncode": 22, "output": "curl: (22) 404"})
+        with self._on(), patch("tools.image_source._http_block_reason", return_value=None), \
+                patch("tools.image_source._get_active_env", return_value=failed):
+            with pytest.raises(isrc.SourceNotFound, match="404"):
+                await isrc.resolve_image_source("https://example.com/a.png", isrc.ResolveContext(task_id="t1"))
+
+    @pytest.mark.asyncio
+    async def test_policy_refusals_still_come_first(self, tmp_path, monkeypatch):
+        isrc = _reload(monkeypatch, tmp_path / "hermes")
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        ran = []
+        with self._on(), patch("tools.image_source._http_block_reason", return_value="blocked by website policy"), \
+                patch("tools.image_source._get_active_env",
+                      return_value=SimpleNamespace(execute=lambda cmd, **kw: ran.append(cmd))):
+            with pytest.raises(isrc.SourceUnsafe):
+                await isrc.resolve_image_source("https://blocked.example/a.png", isrc.ResolveContext(task_id="t1"))
+        assert not ran
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("backend, enabled", [("local", True), ("docker", False)])
+    async def test_the_host_downloads_as_before_when_off_or_local(self, tmp_path, monkeypatch, backend, enabled):
+        isrc = _reload(monkeypatch, tmp_path / "hermes")
+        monkeypatch.setenv("TERMINAL_ENV", backend)
+
+        async def host_download(url):
+            return PNG
+
+        with self._on(enabled), patch("tools.image_source._http_block_reason", return_value=None), \
+                patch("tools.image_source._download_to_bytes", host_download), \
+                patch("tools.image_source._get_active_env", side_effect=AssertionError("no sandbox for this")):
+            res = await isrc.resolve_image_source("https://example.com/a.png", isrc.ResolveContext(task_id="t1"))
+        assert res.data == PNG
