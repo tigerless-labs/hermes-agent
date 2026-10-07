@@ -425,6 +425,8 @@ DEFAULT_CONFIG = {
         "engine": "auto",
         # With a cloud provider, auto-spawn local Chromium for LAN/localhost URLs instead
         "auto_local_for_private_urls": True,
+        # A failed cloud-provider session falls back to local Chromium; false makes it an error instead
+        "cloud_fallback_to_local": True,
         "cdp_url": "",  # persistent CDP endpoint for attaching to an existing Chromium/Chrome
         # Consent to browse with the user's REAL logins locally: runs on a Hermes-managed SNAPSHOT
         # of the ACTIVE default-Chromium profile (Local State -> profile.last_used; cookies, logins,

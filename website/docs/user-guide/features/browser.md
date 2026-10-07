@@ -160,6 +160,21 @@ auto-installs it). Post-navigation redirects from a public URL onto a private
 address are still blocked (you can't use a redirect-to-internal trick to reach
 your LAN through the public path).
 
+#### When the cloud provider fails
+
+If the provider cannot create a session, Hermes falls back to local Chromium for that
+conversation by default. When the provider exists to keep the browser off this host
+(an isolated sandbox, a hardened remote browser), turn the fallback off so a failure is
+an error instead:
+
+```yaml
+browser:
+  cloud_provider: browserbase
+  cloud_fallback_to_local: false
+```
+
+Only a truthy value keeps the fallback; a mistyped value turns it off.
+
 ### Real profile browsing (use your own logins)
 
 By default, local browsing runs in a clean, throwaway profile — the agent is

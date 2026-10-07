@@ -227,6 +227,15 @@ def _auto_local_for_private_urls() -> bool:
     )
 
 
+def _cloud_fallback_to_local() -> bool:
+    """``browser.cloud_fallback_to_local`` (default True), read on every cloud session creation: whether a
+    failed cloud session falls back to local Chromium. Only a truthy value keeps the fallback, so a mistyped
+    value fails closed (the browser errors instead of silently leaving the provider's isolation)."""
+    from utils import is_truthy_value
+    return _origin()._browser_cfg("cloud_fallback_to_local", True, lambda v: is_truthy_value(v, default=True),
+                                  "cloud_fallback_to_local from config")
+
+
 def _use_real_profile() -> bool:
     """Whether the user consented to real-profile local browsing.
 

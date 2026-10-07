@@ -316,6 +316,11 @@ def _create_cloud_session_or_fallback(task_id: str, provider) -> Dict[str, Any]:
         return session_info
     except Exception as e:
         provider_name = type(provider).__name__
+        if not _cloud._cloud_fallback_to_local():
+            _bt.logger.warning("Cloud provider %s failed (%s) for task %s; local fallback is off",
+                               provider_name, e, task_id, exc_info=True)
+            raise RuntimeError(f"Cloud provider {provider_name} failed ({e}); local fallback is off "
+                               f"(browser.cloud_fallback_to_local)") from e
         _bt.logger.warning("Cloud provider %s failed (%s); attempting fallback to local Chromium for task %s",
                            provider_name, e, task_id, exc_info=True)
         try:
