@@ -1,7 +1,8 @@
 """Meta Model API (``muse-image``): OpenAI-compatible (https://api.meta.ai/v1), so the OpenAI SDK
 is pointed at Meta's base URL with ``META_MODEL_API_KEY``. Output is base64 WebP → image cache.
 Source images route to ``/v1/images/edits`` as Meta's JSON body (``images`` of data or public URLs):
-keys with Zero Data Retention reject the SDK's multipart ``images.edit()``.
+keys with Zero Data Retention reject the SDK's multipart ``images.edit()``. An edit with no requested
+aspect ratio sends no ``size``, so Meta keeps the source image's shape.
 Selection: ``model`` kwarg → ``META_IMAGE_MODEL`` → ``image_gen.meta-ai.model`` → ``image_gen.model``
 → :data:`DEFAULT_MODEL`."""
 
@@ -15,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent.secret_scope import get_secret, get_secret_str
 from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response)
+    resolve_aspect_ratio, save_b64_image, save_url_image, success_response)
 from plugins.image_gen._common import (
     StaticImageGenProvider, collect_source_images, error_factory, import_openai, openai_importable,
     prompt_required_error, resolve_static_model, size_for)
@@ -95,7 +96,7 @@ class MetaImageGenProvider(StaticImageGenProvider):
                 "max_source_images": MAX_SOURCE_IMAGES}
 
     def generate(
-        self, prompt: str, aspect_ratio: str = DEFAULT_ASPECT_RATIO, *,
+        self, prompt: str, aspect_ratio: Optional[str] = None, *,
         image_url: Optional[str] = None, reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
@@ -125,11 +126,13 @@ class MetaImageGenProvider(StaticImageGenProvider):
         except Exception as exc:
             return fail(f"Could not load source image for editing: {exc}", "io_error")
         client = openai.OpenAI(api_key=api_key, base_url=_resolve_base_url())
+        keep_source_shape = bool(images) and not aspect_ratio
         try:
             if images:
-                body = client.post("/images/edits", cast_to=object, body={
-                    "model": model_id, "prompt": prompt, "images": images, "size": size, "n": 1})
-                first = _first_item(body)
+                edit_body = {"model": model_id, "prompt": prompt, "images": images, "n": 1}
+                if not keep_source_shape:
+                    edit_body["size"] = size
+                first = _first_item(client.post("/images/edits", cast_to=object, body=edit_body))
             else:
                 first = _first_item(client.images.generate(model=model_id, prompt=prompt, size=size, n=1))
         except Exception as exc:
@@ -149,7 +152,7 @@ class MetaImageGenProvider(StaticImageGenProvider):
                 return fail("Meta response contained neither b64_json nor URL", "empty_response")
         except Exception as exc:
             return fail(f"Failed to save Meta image: {exc}", "io_error")
-        extra: Dict[str, Any] = {"size": size}
+        extra: Dict[str, Any] = {} if keep_source_shape else {"size": size}
         if _field(first, "revised_prompt"):
             extra["revised_prompt"] = _field(first, "revised_prompt")
         return success_response(

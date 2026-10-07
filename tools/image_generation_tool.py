@@ -615,10 +615,12 @@ def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model
 
 
 def _dispatch_to_plugin_provider(
-    prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
+    prompt: str, aspect_ratio: Optional[str], image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None):
     """JSON result from the selected plugin provider, or ``None`` to fall through to in-tree FAL
-    (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``."""
+    (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``.
+    An unasked ``aspect_ratio`` is left out, so a provider's own default applies (an edit may keep
+    its source image's shape)."""
     configured = _plugin_provider_name()
     if configured is None:
         return None
@@ -639,7 +641,9 @@ def _dispatch_to_plugin_provider(
             f"image_gen.provider='{configured}' is set but no plugin registered that name. "
             f"Run `hermes plugins list` to see available image gen backends.", "provider_not_registered")
     pname = getattr(provider, "name", "?")
-    kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
+    kwargs: Dict[str, Any] = {"prompt": prompt}
+    if aspect_ratio:
+        kwargs["aspect_ratio"] = aspect_ratio
     try:
         _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
                              model=_read_configured_image_model())
@@ -759,7 +763,8 @@ def _handle_image_generate(args, **kw):
     prompt = args.get("prompt", "")
     if not prompt:
         return tool_error("prompt is required for image generation")
-    aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    requested_aspect = args.get("aspect_ratio")
+    aspect_ratio = requested_aspect or DEFAULT_ASPECT_RATIO
     upscale = args.get("upscale")
     task_id = kw.get("task_id")
     # Confinement chokepoint BEFORE any dispatch: every route receives sandbox-confined bytes.
@@ -771,11 +776,11 @@ def _handle_image_generate(args, **kw):
     # Portal — only under the "nous"/unset selection, so BYO/direct FAL stays untouched), then FAL.
     sources = dict(image_url=image_url, reference_image_urls=reference_image_urls,
                    upscale=upscale if isinstance(upscale, bool) else None)
-    raw = None
-    for route in (_dispatch_to_plugin_provider, _maybe_route_managed_model, image_generate_tool):
-        raw = route(prompt, aspect_ratio, **sources)
+    raw = _dispatch_to_plugin_provider(prompt, requested_aspect, **sources)
+    for route in (_maybe_route_managed_model, image_generate_tool):
         if raw is not None:
             break
+        raw = route(prompt, aspect_ratio, **sources)
     return _postprocess_image_generate_result(raw, task_id=task_id)
 
 

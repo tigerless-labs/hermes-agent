@@ -129,6 +129,7 @@ as aliases. Set `META_BASE_URL` to point at a proxy or alternate host. Passing
 `image_url` (plus up to nine `reference_image_urls`) edits or composes those images
 through `/v1/images/edits`; the request is Meta's JSON body with the images as data
 or public URLs, because keys with Zero Data Retention reject multipart edits.
+An edit without an `aspect_ratio` keeps the source image's shape.
 Responses are saved to `$HERMES_HOME/cache/images/`.
 
 ## FAL: GPT Image 2.5

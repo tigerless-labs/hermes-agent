@@ -420,3 +420,35 @@ class TestEdit:
 
         assert result["success"] is False
         assert result["error_type"] == "empty_response"
+
+
+class TestEditShape:
+    def test_an_edit_without_a_requested_ratio_keeps_the_sources_shape(self, provider):
+        fake_client = MagicMock()
+        fake_client.post.return_value = {"data": [{"b64_json": _b64_png()}]}
+
+        with _patched_openai(fake_client):
+            result = provider.generate("make it blue", image_url=_data_url())
+
+        assert result["success"] is True
+        assert "size" not in _edit_body(fake_client)
+
+    def test_an_edit_with_a_requested_ratio_sends_its_size(self, provider):
+        fake_client = MagicMock()
+        fake_client.post.return_value = {"data": [{"b64_json": _b64_png()}]}
+
+        with _patched_openai(fake_client):
+            provider.generate("side by side", aspect_ratio="landscape", image_url=_data_url())
+
+        assert _edit_body(fake_client)["size"] == meta_plugin.size_for("landscape")
+
+    def test_text_to_image_without_a_ratio_uses_the_default(self, provider):
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+
+        with _patched_openai(fake_client):
+            provider.generate("a cat")
+
+        from agent.image_gen_provider import DEFAULT_ASPECT_RATIO
+
+        assert fake_client.images.generate.call_args.kwargs["size"] == meta_plugin.size_for(DEFAULT_ASPECT_RATIO)
