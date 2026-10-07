@@ -80,9 +80,21 @@ _LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^()\s]+(?:\([^()]*\)[^()\s]*)*)\)"
 _SLACK_LINK_RE = re.compile(
     r"<([a-zA-Z][a-zA-Z0-9+.\-]*:[^>|]+)(?:\|([^>]+))?>"
 )
+# Bare web URL. rich_text never autolinks (only mrkdwn does), so one left in a text element is
+# unclickable. It ends at whitespace, angle brackets and full-width (CJK) punctuation; trailing
+# punctuation and an unbalanced ")" are then trimmed off, as GFM does for its autolinks.
+_BARE_URL_RE = re.compile(r"(?<![A-Za-z0-9])https?://[A-Za-z0-9][^\s<>　-〿＀-￯]*")
+_BARE_URL_TRAILING = ".,:;!?'\"*_~"
+_BARE_URL_TOKEN_RE = re.compile(r"\x00(\d+)\x00")
 _BOLD_RE = re.compile(r"(?:\*\*|__)(.+?)(?:\*\*|__)")
 _ITALIC_RE = re.compile(r"(?<![\*_])(?:\*|_)(?![\*_\s])(.+?)(?<![\*_\s])(?:\*|_)(?![\*_])")
 _STRIKE_RE = re.compile(r"~~(.+?)~~")
+
+
+def _trim_bare_url(url: str) -> str:
+    while url[-1] in _BARE_URL_TRAILING or (url[-1] == ")" and url.count(")") > url.count("(")):
+        url = url[:-1]
+    return url
 
 
 def _inline_elements(text: str) -> List[Dict[str, Any]]:
@@ -129,25 +141,46 @@ def _inline_elements(text: str) -> List[Dict[str, Any]]:
         # (works in section/mrkdwn; was literal in lists/quotes/table cells).
         pos = 0
         for m in _SLACK_LINK_RE.finditer(s):
-            _walk_emphasis(s[pos : m.start()], style)
+            _walk_bare_urls(s[pos : m.start()], style)
             url = m.group(1)
             _emit_link(url, m.group(2) or url, style)
             pos = m.end()
-        _walk_emphasis(s[pos:], style)
-    def _walk_emphasis(s: str, style: Dict[str, bool]) -> None:
+        _walk_bare_urls(s[pos:], style)
+
+    def _walk_bare_urls(s: str, style: Dict[str, bool]) -> None:
+        # Swap each bare URL for a token before emphasis, so emphasis can neither split a URL
+        # (``a_b_c``) nor be broken by one (``**url**`` still styles the link).
+        if "\x00" in s:
+            _walk_emphasis(s, style, [])
+            return
+        urls: List[str] = []
+
+        def _tokenize(m: re.Match) -> str:
+            url = _trim_bare_url(m.group(0))
+            urls.append(url)
+            return f"\x00{len(urls) - 1}\x00{m.group(0)[len(url):]}"
+        _walk_emphasis(_BARE_URL_RE.sub(_tokenize, s), style, urls)
+
+    def _walk_emphasis(s: str, style: Dict[str, bool], urls: List[str]) -> None:
         if not s:
             return
         # Try bold, then strike, then italic, recursing into the inner span.
         for rx, key in ((_BOLD_RE, "bold"), (_STRIKE_RE, "strike"), (_ITALIC_RE, "italic")):
             m = rx.search(s)
             if m:
-                _walk_emphasis(s[: m.start()], style)
+                _walk_emphasis(s[: m.start()], style, urls)
                 inner_style = dict(style)
                 inner_style[key] = True
-                _walk_emphasis(m.group(1), inner_style)
-                _walk_emphasis(s[m.end() :], style)
+                _walk_emphasis(m.group(1), inner_style, urls)
+                _walk_emphasis(s[m.end() :], style, urls)
                 return
-        emit_text(s, dict(style) if style else None)
+        pos = 0
+        for m in _BARE_URL_TOKEN_RE.finditer(s):
+            emit_text(s[pos : m.start()], dict(style) if style else None)
+            url = urls[int(m.group(1))]
+            _emit_link(url, url, style)
+            pos = m.end()
+        emit_text(s[pos:], dict(style) if style else None)
     walk(text, {})
     return elements or [{"type": "text", "text": text}]
 
