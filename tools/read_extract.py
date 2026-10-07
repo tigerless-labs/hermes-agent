@@ -16,6 +16,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -75,14 +76,22 @@ def _anydoc() -> Optional[Any]:
                 and time.monotonic() - _anydoc_failed_at < ANYDOC_RETRY_SECONDS):
             return None
         try:
-            from tools.lazy_deps import ensure as _lazy_ensure
-            _lazy_ensure("tool.doc_extract", prompt=False)  # read_file must never block on a prompt
+            _ensure_doc_extract()
             _anydoc_module = importlib.import_module("anydoc")
         except Exception:  # install failure, ImportError or a broken native binding
             _anydoc_failed_at = time.monotonic()
             return None
         _anydoc_failed_at = None
     return _anydoc_module  # type: ignore[return-value]
+
+
+def _ensure_doc_extract() -> None:
+    """Lazy-install the converter inside the engine; run on its own (in a sandbox) it is there or not."""
+    try:
+        from tools.lazy_deps import ensure as _lazy_ensure
+    except ImportError:
+        return
+    _lazy_ensure("tool.doc_extract", prompt=False)  # read_file must never block on a prompt
 
 
 def is_extractable_document(path: str) -> bool:
@@ -151,7 +160,10 @@ def _hosted_ocr_config() -> tuple:
     live-probed broken, so it is NOT used. ``file_tools.hosted_ocr: false`` disables even with a
     key. The key is a profile credential: read through the secret scope so a multiplexed
     secondary never spends (or reveals its documents to) the default profile's Firecrawl key."""
-    from agent.secret_scope import get_secret
+    try:
+        from agent.secret_scope import get_secret
+    except ImportError:  # run on its own in a sandbox: no credentials there
+        return False, None, None
     api_key = get_secret("FIRECRAWL_API_KEY") or None
     enabled = api_key is not None
     with contextlib.suppress(Exception):
@@ -346,7 +358,11 @@ def _base64_bytes(payload: str) -> int:
 
 def _clean_stream_text(text: str) -> str:
     """Strip ANSI escapes; keep only the final ``\\r`` frame of each line (tqdm redraws)."""
-    from tools.ansi_strip import strip_ansi
+    try:
+        from tools.ansi_strip import strip_ansi
+    except ImportError:  # run on its own in a sandbox
+        def strip_ansi(value: str) -> str:
+            return value
     return "\n".join(([f for f in line.split("\r") if f] or [""])[-1]
                      for line in strip_ansi(text).replace("\r\n", "\n").split("\n"))
 
@@ -616,6 +632,23 @@ def _sqlite_cell(value: Any) -> str:
 _STDLIB_EXTRACTORS: dict[str, Callable[[str], str]] = {
     ".ipynb": _extract_notebook, ".docx": _extract_docx, ".xlsx": _extract_xlsx,
     ".db": _extract_sqlite, ".sqlite": _extract_sqlite, ".sqlite3": _extract_sqlite}
+
+
+def main(argv: list) -> None:
+    """Run on its own — ``python3 - <path>`` with this file on stdin, as read_file does inside a sandbox — and print
+    one JSON line: ``{"text", "size"}``, or ``{"error"}`` for a document that cannot be read."""
+    path = argv[1]
+    try:
+        size = os.path.getsize(path)
+        _check_size(size, MAX_DOCUMENT_BYTES)
+        answer = {"text": extract_document_text(path), "size": size}
+    except Exception as exc:  # noqa: BLE001 — every failure is the caller's ExtractionError
+        answer = {"error": str(exc) if isinstance(exc, (ExtractionError, OSError)) else f"{type(exc).__name__}: {exc}"}
+    print(json.dumps(answer))
+
+
+if __name__ == "__main__":
+    main(sys.argv)
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

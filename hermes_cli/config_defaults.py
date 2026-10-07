@@ -1758,6 +1758,9 @@ DEFAULT_CONFIG = {
         # Under a non-local terminal backend, download model-supplied media URLs (vision, generation references)
         # inside the session's own sandbox instead of on the host, so the host never fetches them.
         "media_downloads_in_sandbox": False,
+        # Under a non-local terminal backend, read_file parses documents (PDF, Office, notebooks, SQLite) inside the
+        # session's own sandbox with the engine's own extraction code, so the host never parses their contents.
+        "document_parsing_in_sandbox": False,
         # CIDR blocks a local TUN proxy answers DNS with (Mihomo/Clash fake-ip, Surge enhanced).
         # Answers inside these blocks are the proxy's sentinels, not internal hosts, so the guard
         # dials them instead of rejecting them as private. Empty = normal private-address verdict.

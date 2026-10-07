@@ -779,6 +779,20 @@ security:
 The website policy and the private-address check still run on the host first; without an active sandbox the
 download fails rather than falling back to the host.
 
+#### Parsing documents inside the sandbox
+
+Under a non-local terminal backend, `read_file` still copies a document's bytes out of the sandbox and parses them on
+the host (PDF and Office converters, notebooks, SQLite files). To keep parsers away from the host, run the engine's
+own extraction code inside the session's sandbox instead:
+
+```yaml
+security:
+  document_parsing_in_sandbox: true   # default: false
+```
+
+The sandbox needs `python3`, and for PDF and legacy Office formats the same `firecrawl-anydoc` version the engine
+pins. If the sandbox cannot parse the document, `read_file` returns an error rather than parsing it on the host.
+
 #### Intentionally allowing private URLs
 
 Some setups legitimately need private/internal URL access — home networks that resolve `home.arpa` to RFC 1918 space, LAN-only Ollama/llama.cpp endpoints, internal wikis, cloud metadata debugging, and the like. For those cases there's a global opt-out:

@@ -278,6 +278,19 @@ def _session_platform() -> tuple:
     return platform, platform in OPUS_VOICE_PLATFORMS
 
 
+def _chat_scoped_output_dir() -> tuple:
+    """``(dir, None)`` with chat-scoped caches — the current chat's audio cache, where a caller's path keeps only its
+    file name; ``(None, None)`` with shared caches; ``(None, error_json)`` for a session outside any chat, which has
+    no exchange area to write into."""
+    from hermes_constants import current_chat_cache_scope
+    scope = current_chat_cache_scope()
+    if scope is None:
+        return None, None
+    if not scope:
+        return None, _error_json("speech is written only inside a chat's own cache, and this session belongs to no chat")
+    return _default_output_dir(), None
+
+
 def _resolve_output_base(
     output_path: Optional[str], provider: str, command_provider_config: Optional[Dict[str, Any]], want_opus: bool,
 ) -> tuple:
@@ -302,6 +315,11 @@ def _resolve_output_base(
                 f"output_path contains '..' traversal component: {output_path}. "
                 "Use an absolute path or one relative to the current directory without '..'.")
         file_path = Path(output_path).expanduser()
+        scoped_dir, scope_error = _chat_scoped_output_dir()
+        if scope_error:
+            return None, scope_error
+        if scoped_dir is not None:
+            file_path = Path(scoped_dir) / file_path.name
         if command_provider_config is not None:
             file_path = _configured_command_tts_output_path(file_path, command_provider_config)
         from agent.file_safety import is_write_approval_required, is_write_denied
@@ -310,6 +328,9 @@ def _resolve_output_base(
                 f"output_path targets a protected credential or system path: "
                 f"{file_path}. Choose a normal audio output location.")
     else:
+        _, scope_error = _chat_scoped_output_dir()
+        if scope_error:
+            return None, scope_error
         if command_provider_config is not None:
             ext = _get_command_tts_output_format(command_provider_config)
         else:
