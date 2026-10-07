@@ -1,19 +1,24 @@
 """Meta Model API (``muse-image``): OpenAI-compatible (https://api.meta.ai/v1), so the OpenAI SDK
 is pointed at Meta's base URL with ``META_MODEL_API_KEY``. Output is base64 WebP → image cache.
+Source images route to ``/v1/images/edits`` as Meta's JSON body (``images`` of data or public URLs):
+keys with Zero Data Retention reject the SDK's multipart ``images.edit()``.
 Selection: ``model`` kwarg → ``META_IMAGE_MODEL`` → ``image_gen.meta-ai.model`` → ``image_gen.model``
 → :data:`DEFAULT_MODEL`."""
 
 from __future__ import annotations
 
+import base64
 import logging
+import mimetypes
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.secret_scope import get_secret, get_secret_str
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response)
 from plugins.image_gen._common import (
-    StaticImageGenProvider, error_factory, import_openai, openai_importable, prompt_required_error,
-    resolve_static_model, size_for)
+    StaticImageGenProvider, collect_source_images, error_factory, import_openai, openai_importable,
+    prompt_required_error, resolve_static_model, size_for)
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +51,29 @@ _MODELS: Dict[str, Dict[str, Any]] = {
     },
 }
 DEFAULT_MODEL = "muse-image-1.0"
+# ``/v1/images/edits`` takes 1–10 input images.
+MAX_SOURCE_IMAGES = 10
+_PASSTHROUGH_PREFIXES = ("http://", "https://", "data:")
 
 
 def _resolve_model(caller_model: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
     return resolve_static_model(
         _MODELS, DEFAULT_MODEL, env_var="META_IMAGE_MODEL", config_key="meta-ai", explicit=caller_model,
     )
+
+
+def _image_entry(source: str) -> Dict[str, str]:
+    """One ``images`` entry: URLs and data URIs pass through; a local path is inlined as a data URI."""
+    if source.lower().startswith(_PASSTHROUGH_PREFIXES):
+        return {"image_url": source}
+    from agent.file_safety import raise_if_read_blocked  # credential-read guard before local bytes
+
+    path = os.path.expanduser(source)
+    raise_if_read_blocked(path)
+    with open(path, "rb") as fh:  # windows-footgun: ok
+        raw = fh.read()
+    mime = mimetypes.guess_type(path)[0] or "image/png"
+    return {"image_url": f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"}
 
 
 class MetaImageGenProvider(StaticImageGenProvider):
@@ -69,8 +91,8 @@ class MetaImageGenProvider(StaticImageGenProvider):
         return bool(_resolve_api_key()) and openai_importable()
 
     def capabilities(self) -> Dict[str, Any]:
-        # Text-to-image only until image-to-image is verified against Meta.
-        return {"modalities": ["text"], "max_reference_images": 0}
+        return {"modalities": ["text", "image"], "max_reference_images": MAX_SOURCE_IMAGES - 1,
+                "max_source_images": MAX_SOURCE_IMAGES}
 
     def generate(
         self, prompt: str, aspect_ratio: str = DEFAULT_ASPECT_RATIO, *,
@@ -94,20 +116,30 @@ class MetaImageGenProvider(StaticImageGenProvider):
         model_id, _meta = _resolve_model(kwargs.get("model"))
         size = size_for(aspect)
         fail = error_factory("meta-ai", aspect, model=model_id, prompt=prompt)
+        sources = collect_source_images(image_url, reference_image_urls)
+        if len(sources) > MAX_SOURCE_IMAGES:
+            return fail(f"Meta image editing takes at most {MAX_SOURCE_IMAGES} source images",
+                        "too_many_references")
+        try:
+            images = [_image_entry(source) for source in sources]
+        except Exception as exc:
+            return fail(f"Could not load source image for editing: {exc}", "io_error")
         client = openai.OpenAI(api_key=api_key, base_url=_resolve_base_url())
         try:
-            response = client.images.generate(model=model_id, prompt=prompt, size=size, n=1)
+            if images:
+                body = client.post("/images/edits", cast_to=object, body={
+                    "model": model_id, "prompt": prompt, "images": images, "size": size, "n": 1})
+                first = _first_item(body)
+            else:
+                first = _first_item(client.images.generate(model=model_id, prompt=prompt, size=size, n=1))
         except Exception as exc:
             logger.debug("Meta image generation failed", exc_info=True)
             return fail(f"Meta image generation failed: {exc}", "api_error")
-
-        try:
-            first = response.data[0]
-        except (AttributeError, IndexError, TypeError):
+        if first is None:
             return fail("Meta response contained no image data", "empty_response")
 
-        b64 = getattr(first, "b64_json", None)
-        url = getattr(first, "url", None)
+        b64 = _field(first, "b64_json")
+        url = _field(first, "url")
         try:
             if b64:
                 image_ref = str(save_b64_image(b64, prefix="meta", extension="webp"))
@@ -118,11 +150,24 @@ class MetaImageGenProvider(StaticImageGenProvider):
         except Exception as exc:
             return fail(f"Failed to save Meta image: {exc}", "io_error")
         extra: Dict[str, Any] = {"size": size}
-        if getattr(first, "revised_prompt", None):
-            extra["revised_prompt"] = first.revised_prompt
+        if _field(first, "revised_prompt"):
+            extra["revised_prompt"] = _field(first, "revised_prompt")
         return success_response(
             image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="meta-ai",
-            modality="text", extra=extra)
+            modality="image" if images else "text", extra=extra)
+
+
+def _field(item: Any, name: str) -> Any:
+    return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+
+def _first_item(response: Any) -> Any:
+    """``data[0]`` of an SDK response object or of a raw JSON body; ``None`` when absent."""
+    data = _field(response, "data")
+    try:
+        return data[0]
+    except (IndexError, KeyError, TypeError):
+        return None
 
 
 def register(ctx) -> None:
