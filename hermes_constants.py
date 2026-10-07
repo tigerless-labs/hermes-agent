@@ -454,9 +454,23 @@ def cache_max_age_hours() -> int:
     return hours if hours >= 1 else DEFAULT_CACHE_MAX_AGE_HOURS
 
 
+_BORROWED_CHAT_CACHE_SCOPE: ContextVar[str] = ContextVar("hermes_borrowed_chat_cache_scope", default="")
+
+
+@contextlib.contextmanager
+def borrowed_chat_cache_scope(platform: str, chat_id: str):
+    """Let a context that belongs to no chat (a background run working for one) use that chat's caches;
+    a session's own chat still wins. A blank platform or chat borrows nothing."""
+    token = _BORROWED_CHAT_CACHE_SCOPE.set(chat_scope_slug(platform, chat_id) if platform and chat_id else "")
+    try:
+        yield
+    finally:
+        _BORROWED_CHAT_CACHE_SCOPE.reset(token)
+
+
 def current_chat_cache_scope() -> str | None:
     """None: caches are shared (default). ``""``: caches are scoped but this context belongs to no
-    chat, so it sees no cache. Otherwise the current chat's slug."""
+    chat and borrows none, so it sees no cache. Otherwise the current (or borrowed) chat's slug."""
     if not chat_cache_scope_enabled():
         return None
     try:
@@ -464,7 +478,7 @@ def current_chat_cache_scope() -> str | None:
         platform, chat_id = get_session_env("HERMES_SESSION_PLATFORM"), get_session_env("HERMES_SESSION_CHAT_ID")
     except Exception:
         return ""
-    return chat_scope_slug(platform, chat_id) if platform and chat_id else ""
+    return chat_scope_slug(platform, chat_id) if platform and chat_id else _BORROWED_CHAT_CACHE_SCOPE.get()
 
 
 def chat_scoped_roots(roots) -> list[Path]:
