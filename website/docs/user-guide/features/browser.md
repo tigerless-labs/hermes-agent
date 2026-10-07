@@ -175,6 +175,16 @@ browser:
 
 Only a truthy value keeps the fallback; a mistyped value turns it off.
 
+#### Keeping the credential vault from the model
+
+The `browser_vault_*` tools ride with the browser, so the agent can offer to remember a login and fill it later.
+On a gateway shared by people who must not fill each other's saved logins, turn them off:
+
+```yaml
+browser:
+  credential_vault: false
+```
+
 ### Real profile browsing (use your own logins)
 
 By default, local browsing runs in a clean, throwaway profile — the agent is

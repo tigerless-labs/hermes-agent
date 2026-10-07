@@ -19,6 +19,8 @@ from typing import Optional
 # Raw-bytes INGEST budget: deliberately the 50MB download cap, NOT the 20MB provider
 # payload cap — that one is enforced post-resize at the call sites.
 _MAX_INGEST_BYTES = 50 * 1024 * 1024
+_SANDBOX_DOWNLOAD_SECONDS = 60
+_SANDBOX_DOWNLOAD_REDIRECTS = 5
 
 
 class ImageResolutionError(Exception):
@@ -62,6 +64,8 @@ async def resolve_image_source(
         reason = _http_block_reason(s)
         if reason:
             raise SourceUnsafe(reason, src=s)
+        if _downloads_in_sandbox():
+            return _finalize(await _download_in_sandbox(s, ctx), "", "http", s, permitted)
         return _finalize(await _download_to_bytes(s), "", "http", s, permitted)
     if _SCHEME_RE.match(s) and not s.lower().startswith("file://"):
         raise UnsupportedScheme(
@@ -143,6 +147,43 @@ async def _download_to_bytes(url: str) -> bytes:
         tmp.unlink(missing_ok=True)
 
 
+def _downloads_in_sandbox() -> bool:
+    """``security.media_downloads_in_sandbox`` under a non-local backend: the session's sandbox fetches
+    model-supplied URLs, so the host never does (its network checks then guard only what it fetches itself)."""
+    if _is_local_terminal_backend():
+        return False
+    try:
+        from hermes_cli.config import load_config
+        from utils import is_truthy_value
+        return is_truthy_value((load_config().get("security") or {}).get("media_downloads_in_sandbox"), default=False)
+    except Exception:
+        return False
+
+
+async def _download_in_sandbox(url: str, ctx: ResolveContext) -> bytes:
+    """Fetch *url* inside the session's own sandbox, bounded like the exec-read; fail closed without one."""
+    import shlex
+    _ensure_container_env(ctx.task_id)
+    env = _get_active_env(ctx.task_id)
+    if env is None:
+        raise SourceNotFound("no active sandbox session is available to download the URL", src=url, origin="http")
+    cmd = (f"f=$(mktemp) && curl -fsSL --proto =http,https --proto-redir =http,https "
+           f"--max-redirs {_SANDBOX_DOWNLOAD_REDIRECTS} --max-time {_SANDBOX_DOWNLOAD_SECONDS} "
+           f"--max-filesize {_MAX_INGEST_BYTES} -o \"$f\" {shlex.quote(url)} "
+           f"&& head -c {_MAX_INGEST_BYTES + 1} < \"$f\" | base64 | tr -d '\\n'; status=$?; rm -f \"$f\"; exit $status")
+    res = await asyncio.to_thread(env.execute, cmd)
+    if res.get("returncode", 1) != 0:
+        first = next((ln.strip() for ln in (res.get("output") or "").splitlines() if ln.strip()), "")
+        raise SourceNotFound(f"could not download the URL inside the sandbox ({first[:200]})", src=url, origin="http")
+    try:
+        data = base64.b64decode(res.get("output", ""), validate=True)
+    except Exception as exc:
+        raise NotAnImage(f"sandbox returned non-image data for the URL: {exc}", src=url, origin="http")
+    if len(data) > _MAX_INGEST_BYTES:
+        raise SourceTooLarge("media exceeds size limit", src=url, origin="http")
+    return data
+
+
 def _is_local_terminal_backend() -> bool:
     """True when the terminal backend runs directly on the host (keys off ``TERMINAL_ENV``, read
     through the per-turn terminal scope so a routed multiplex profile sees ITS backend)."""
@@ -159,9 +200,14 @@ _MEDIA_CACHE_SUBDIRS = (
 
 
 def _media_cache_roots() -> list:
-    from hermes_constants import get_hermes_home
-    home = get_hermes_home()
-    return [home / sub for sub in _MEDIA_CACHE_SUBDIRS]
+    """Every media cache, or — with ``terminal.docker_cache_scope: chat`` — only the current chat's cache dirs
+    (the ones its sandbox mounts; none outside a chat), by the same rule media delivery applies."""
+    from hermes_constants import chat_scoped_roots, current_chat_cache_scope, get_hermes_dir, get_hermes_home
+    if current_chat_cache_scope() is None:
+        home = get_hermes_home()
+        return [home / sub for sub in _MEDIA_CACHE_SUBDIRS]
+    from tools.credential_files import _CACHE_DIRS
+    return chat_scoped_roots(get_hermes_dir(sub, old, chat_scoped=False) for sub, old in _CACHE_DIRS)
 
 
 def _permitted_host_read_target(p: Path, ctx: ResolveContext) -> Optional[Path]:

@@ -826,3 +826,18 @@ class TestTwoFactor:
              patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval):
             out = json.loads(browser_vault_tool.browser_vault_enter_code(task_id="t"))
         assert out["error_type"] == "no_code_field"
+
+
+class TestVaultSwitch:
+    """``browser.credential_vault: false`` keeps the vault tools from the model on a gateway shared by people who
+    must not fill each other's logins; the default keeps them riding with the browser."""
+
+    @pytest.mark.parametrize("browser_cfg, offered", [({}, True), ({"credential_vault": True}, True),
+                                                       ({"credential_vault": False}, False),
+                                                       ({"credential_vault": "false"}, False)])
+    def test_the_vault_rides_with_the_browser_unless_switched_off(self, monkeypatch, browser_cfg, offered):
+        import tools.browser_vault_tool as vault_tool
+
+        monkeypatch.setattr("tools.browser_tool_install.check_browser_requirements", lambda: True)
+        with patch("hermes_cli.config.load_config", return_value={"browser": browser_cfg}):
+            assert vault_tool._check_vault_available() is offered

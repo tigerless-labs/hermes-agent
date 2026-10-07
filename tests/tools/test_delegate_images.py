@@ -96,3 +96,36 @@ def test_images_advertised_per_task_only():
     item = DELEGATE_TASK_SCHEMA["parameters"]["properties"]["tasks"]["items"]
     assert item["properties"]["images"]["type"] == "array" and "images" not in item["required"]
     assert "images" not in DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+
+
+def test_under_a_sandbox_a_childs_local_images_are_read_the_way_vision_reads_them(tmp_path, monkeypatch):
+    """Under a non-local backend a model-supplied path never reaches the host's disk directly: it goes through the
+    vision resolver (the chat's cache or the session's own sandbox), with the parent's task."""
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    host_image = _png(tmp_path)
+    resolved = "data:image/png;base64,Q09OVEFJTkVS"
+    asked = []
+
+    async def resolve(src, task_id, *, permitted=("image",)):
+        asked.append((src, task_id))
+        return resolved
+
+    with patch("agent.image_routing.decide_image_input_mode", return_value="native"), \
+            patch("tools.image_source.resolve_local_source_to_data_url", resolve):
+        msg = _build_child_goal_message("Look", [host_image], _FakeChild(), task_id="parent-task")
+    assert [p["image_url"]["url"] for p in msg if p.get("type") == "image_url"] == [resolved]
+    assert asked == [(host_image, "parent-task")]
+    assert base64.b64encode(_PNG).decode() not in str(msg)
+
+
+def test_under_a_sandbox_an_image_the_resolver_refuses_is_dropped_not_read_off_the_host(tmp_path, monkeypatch):
+    from tools.image_source import SourceUnsafe
+
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+
+    async def refuse(src, task_id, *, permitted=("image",)):
+        raise SourceUnsafe("outside the chat", src=src)
+
+    with patch("agent.image_routing.decide_image_input_mode", return_value="native"), \
+            patch("tools.image_source.resolve_local_source_to_data_url", refuse):
+        assert _build_child_goal_message("Look", [_png(tmp_path)], _FakeChild(), task_id="t") == "Look"
