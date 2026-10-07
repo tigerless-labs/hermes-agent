@@ -85,6 +85,82 @@ class TestInlineFormatting:
         assert len(items) == 3
 
 
+def _inline(block):
+    """Inline elements of a rich_text list/quote block or a table block, flattened."""
+    if block["type"] == "table":
+        return [el for row in block["rows"] for cell in row for el in _inline(cell)]
+    return [el for part in block["elements"] for item in part["elements"]
+            for el in (item["elements"] if "elements" in item else [item])]
+
+
+def _links(block):
+    return [el["url"] for el in _inline(block) if el["type"] == "link"]
+
+
+def _visible(block):
+    return "".join(el["text"] for el in _inline(block))
+
+
+class TestBareLinks:
+    """rich_text does not autolink, so a bare URL left in a text element is unclickable."""
+
+    DRIVE = "https://docs.google.com/spreadsheets/d/1SFz/edit?usp=drivesdk&ouid=1095&rtpof=true&sd=true"
+    PAGE = "https://mistral.ai/news/mistral-large-4/"
+
+    def test_bare_urls_in_list_items_become_links(self):
+        items = [f"链接：{self.DRIVE}", f"Mistral Large 4 — 1951/1166：新旗舰开源模型 {self.PAGE}", "无链接的一项"]
+        block = render_blocks("\n".join(f"- {item}" for item in items))[0]
+        assert _links(block) == [self.DRIVE, self.PAGE]
+        assert _visible(block) == "".join(items)
+
+    def test_bare_urls_in_quotes_and_table_cells_become_links(self):
+        quote = render_blocks(f"> 见 {self.PAGE}")[0]
+        table = render_blocks(f"| 名称 | 链接 |\n|---|---|\n| Drive | {self.DRIVE} |")[0]
+        assert (quote["type"], table["type"]) == ("rich_text", "table")
+        assert _links(quote) == [self.PAGE]
+        assert _links(table) == [self.DRIVE]
+
+    def test_full_width_punctuation_ends_a_url(self):
+        for mark in "，。：；！？）】」、":
+            block = render_blocks(f"- （{self.PAGE}{mark}后文")[0]
+            assert _links(block) == [self.PAGE], mark
+            assert _visible(block) == f"（{self.PAGE}{mark}后文"
+
+    def test_trailing_sentence_punctuation_and_unbalanced_paren_stay_text(self):
+        wiki = "https://en.wikipedia.org/wiki/Foo_(bar)"
+        block = render_blocks(f"- see ({self.PAGE}), then {wiki}. Done?")[0]
+        assert _links(block) == [self.PAGE, wiki]
+        assert _visible(block) == f"see ({self.PAGE}), then {wiki}. Done?"
+
+    def test_emphasis_markers_inside_a_url_stay_part_of_it(self):
+        url = "https://example.com/a_b_c/x*y*z/__init__.py"
+        block = render_blocks(f"- {url} and _real_")[0]
+        assert _links(block) == [url]
+        assert [el["text"] for el in _inline(block) if el.get("style", {}).get("italic")] == ["real"]
+
+    def test_emphasis_around_a_url_styles_the_link(self):
+        block = render_blocks(f"- **{self.PAGE}**")[0]
+        (link,) = [el for el in _inline(block) if el["type"] == "link"]
+        assert link["url"] == self.PAGE and link.get("style", {}).get("bold")
+        assert "*" not in _visible(block)
+
+    def test_written_links_keep_their_labels_beside_bare_ones(self):
+        block = render_blocks(f"- [文件]({self.DRIVE}) 与 <{self.PAGE}|博客> 与 {self.PAGE}")[0]
+        assert [(el["url"], el["text"]) for el in _inline(block) if el["type"] == "link"] == [
+            (self.DRIVE, "文件"), (self.PAGE, "博客"), (self.PAGE, self.PAGE)]
+
+    def test_redteam_only_web_urls_become_links(self):
+        text = "javascript:alert(1) data:text/html,x file:///etc/passwd ftp://h/x https:// http://<x> xhttps://evil.example"
+        block = render_blocks(f"- {text}")[0]
+        assert _links(block) == []
+        assert _visible(block) == text
+
+    def test_urls_in_inline_code_stay_code(self):
+        block = render_blocks(f"- run `curl {self.PAGE}`")[0]
+        assert _links(block) == []
+        assert any(el.get("style", {}).get("code") and self.PAGE in el["text"] for el in _inline(block))
+
+
 class TestTables:
     def test_pipe_table_renders_native_table_block(self):
         md = (
