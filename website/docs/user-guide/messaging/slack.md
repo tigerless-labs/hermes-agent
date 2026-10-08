@@ -446,8 +446,10 @@ platforms:
       # Collapse approved command prompts to a single line.
       collapse_resolved_approvals: false
 
-      # From outside the gateway (cron, tools): the text and every file as one message.
+      # A reply's (or a cron/tool send's) text and every file as one message.
       media_in_one_message: false
+      # Name in the chat a MEDIA file a reply asked for but delivery refused.
+      report_dropped_media: false
 
       # The thread root's files of any kind reach the first turn in that thread (unset: images only).
       # thread_root_files: 10
@@ -488,7 +490,9 @@ platforms:
 | `platforms.slack.extra.native_task_cards` | `false` | When `true`, renders live tool calls as Slack-native plan/task cards. Cards work with Slack's built-in default `tool_progress: off`; an explicitly configured `display.tool_progress: off` (global or `display.platforms.slack`; `/verbose` writes the same key) disables cards too. Cards need a thread: when the card lane is active and the chat has no thread to anchor on (a top-level DM with `reply_in_thread: false`), Hermes shows no tool progress instead of text bubbles, unless you explicitly set `tool_progress: new`/`all`, which falls back to editable text progress there. Recoverable native API failures fall back to one continuously edited text update. |
 | `platforms.slack.extra.task_card_title` | `"Hermes is working"` | Header of the native task card and of its text fallback. |
 | `platforms.slack.extra.collapse_resolved_approvals` | `false` | When `true`, an approved command prompt is rewritten to one context line naming the decision and a truncated command. Denied and expired prompts keep their full text. |
-| `platforms.slack.extra.media_in_one_message` | `false` | When `true`, a send from outside the gateway process (cron, tools) carries its text and every file as one message (up to 10 files per message), and answers with that message's ts. |
+| `platforms.slack.extra.media_in_one_message` | `false` | When `true`, a reply and a send from outside the gateway (cron, tools) post one message carrying their text and up to 10 files: the text as the same Block Kit a reply gets, or plain when `rich_blocks` is off. What does not fit goes into that message's thread (or stays in the thread the send was made in): further files ten at a time, or all the files when the text is longer than `one_message_max_bytes`. Answers with that message's ts. |
+| `platforms.slack.extra.one_message_max_bytes` | `12000` | Longest text, in UTF-8 bytes (compact Block Kit JSON, or the plain text), that rides in the message carrying files; Slack accepts longer blocks on an upload but then never shares the files. |
+| `platforms.slack.extra.report_dropped_media` | `false` | When `true`, a `MEDIA:` file a reply asked for but delivery refused (missing, denied) is named in the chat with the usual "couldn't deliver" notice. |
 | `platforms.slack.extra.thread_root_files` | unset | How many of a thread root's files, of any kind, reach the first turn when the bot is first called in that thread; they are cached the way an inbound file is. Unset keeps the root's images only. |
 | `platforms.slack.extra.suggested_prompts` | `[]` | Up to four `{title, message}` prompts for Agent/Assistant DM entry points; accepts either a list or `{title, prompts}`. |
 | `platforms.slack.extra.assistant_thread_titles` | `true` | When `true`, names Agent/Assistant DM threads from the first user message. |

@@ -10,7 +10,7 @@ import os
 import re
 import time
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Awaitable, Callable, ClassVar, Dict, Optional, Any, Tuple, List
 
 import aiohttp
@@ -46,7 +46,7 @@ from gateway.platforms.base import (
     gateway_trust_env, BasePlatformAdapter, ExecApprovalPrompt,
     SendResult, SUPPORTED_DOCUMENT_TYPES, SUPPORTED_VIDEO_TYPES, _TEXT_INJECT_EXTENSIONS,
     is_host_excluded_by_no_proxy, resolve_proxy_url, safe_url_for_log, _ssrf_redirect_guard,
-    cache_document_from_bytes_async, cache_video_from_bytes_async,
+    cache_document_from_bytes_async, cache_video_from_bytes_async, _media_failure_text,
 )
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 
@@ -996,6 +996,13 @@ def _extra_or_env_channel_set_getter(
 
 # Slack's cap on files in one ``files_upload_v2`` call.
 _FILES_PER_UPLOAD = 10
+# Send metadata key carrying the files a final reply posts in the same message as its text.
+FINAL_TEXT_FILES = "final_text_files"
+# Longest text (compact Block Kit JSON, or the plain comment), in UTF-8 bytes, that rides in the message carrying
+# files: Slack accepts the upload of longer blocks but never shares the files (13 280 verified, 17 677 lost; counted
+# in bytes, which is never below Slack's count). ``extra.one_message_max_bytes`` overrides; past it the text posts on
+# its own and the files go into its thread.
+_ONE_MESSAGE_MAX_BYTES = 12000
 # Slack shares an uploaded file into its message a moment after ``files_upload_v2`` returns; ``files.info``
 # is asked this many times, this far apart, for the share that names the message.
 _SHARE_POLL_ATTEMPTS = 10
@@ -2234,15 +2241,22 @@ class SlackAdapter(BasePlatformAdapter):
         thread_ts = None
         try:
             team_id = self._metadata_team_id(metadata)
+            files = list((metadata or {}).get(FINAL_TEXT_FILES) or [])
             slash_ctx = self._pop_slash_context(chat_id, team_id)
             if slash_ctx:
-                return await self._send_slash_reply(chat_id, slash_ctx, content, metadata)
+                result = await self._send_slash_reply(chat_id, slash_ctx, content, metadata)
+                await self._send_files_only(chat_id, files, self._resolve_thread_ts(reply_to, metadata), metadata)
+                return result
             # An active native stream that this content finalizes IS the final
             # message: seal it instead of posting a duplicate.
             stream_result = await self._try_finalize_stream(chat_id, content)
             if stream_result is not None:
+                await self._send_files_only(chat_id, files, self._resolve_thread_ts(reply_to, metadata), metadata)
                 return stream_result
             formatted = self.format_message(content)
+            if files:
+                return await self._send_text_with_files(
+                    chat_id, team_id, content, formatted, files, self._resolve_thread_ts(reply_to, metadata), metadata)
             if not formatted or not formatted.strip():
                 # Slack returns ``no_text`` for blank posts; still the end of a
                 # delivery attempt, so the "is thinking..." status must clear.
@@ -2259,11 +2273,7 @@ class SlackAdapter(BasePlatformAdapter):
             # Track sent ts (and the thread root) so thread replies get answered
             # without an @mention.
             sent_ts = last_result.get("ts") if last_result else None
-            if sent_ts:
-                self._bot_message_ts.add(self._workspace_message_marker(team_id, sent_ts))
-                if thread_ts:
-                    self._bot_message_ts.add(self._workspace_message_marker(team_id, thread_ts))
-                self._trim_bot_message_timestamps()
+            self._remember_sent(team_id, sent_ts, thread_ts)
             return SendResult(success=True, message_id=sent_ts, raw_response=last_result)
         except Exception as e:  # pragma: no cover - defensive logging
             # Clear the status even when the failure preceded thread_ts resolution:
@@ -2278,6 +2288,80 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(
                 success=False, error=str(e), retryable=_retryable,
                 retry_after=self._retry_after_from_exc(e) if _retryable else None)
+
+    def _remember_sent(self, team_id: str, sent_ts: Optional[str], thread_ts: Optional[str]) -> None:
+        """Track a sent ts (and its thread root) so replies in that thread wake the bot unmentioned."""
+        if sent_ts:
+            self._bot_message_ts.add(self._workspace_message_marker(team_id, sent_ts))
+            if thread_ts:
+                self._bot_message_ts.add(self._workspace_message_marker(team_id, thread_ts))
+            self._trim_bot_message_timestamps()
+
+    def _attach_files_to_final_text(self, extracted, metadata, is_ephemeral_response):
+        """``extra.media_in_one_message``: a public reply's files (voice notes aside) ride in its text's message."""
+        files = [path for path, is_voice in extracted.media_files if not is_voice]
+        if is_ephemeral_response or not files or not self._extra_flag("media_in_one_message"):
+            return metadata, extracted
+        return ({**(metadata or {}), FINAL_TEXT_FILES: files},
+                replace(extracted, media_files=[(path, is_voice) for path, is_voice in extracted.media_files if is_voice]))
+
+    def _reports_dropped_media(self) -> bool:
+        return self._extra_flag("report_dropped_media")
+
+    async def _deliver_media_attachments(self, event, media_files, local_files, *, force_document_attachments,
+                                         human_delay, metadata, record_delivery) -> None:
+        """``extra.media_in_one_message``: a reply's remaining files (voice notes aside) as one message."""
+        files = [path for path, is_voice in media_files if not is_voice]
+        if files and self._extra_flag("media_in_one_message"):
+            chat_id = await self._dm_target(event.source.chat_id, metadata)
+            sent = await self._send_files_only(chat_id, files, self._resolve_thread_ts(None, metadata), metadata)
+            record_delivery(SendResult(success=sent is not None, message_id=(sent or {}).get("message_id")))
+            media_files = [(path, is_voice) for path, is_voice in media_files if is_voice]
+        await super()._deliver_media_attachments(
+            event, media_files, local_files, force_document_attachments=force_document_attachments,
+            human_delay=human_delay, metadata=metadata, record_delivery=record_delivery)
+
+    async def _send_text_with_files(
+        self, chat_id: str, team_id: str, content: str, formatted: str, files: List[str],
+        thread_ts: Optional[str], metadata: Optional[Dict[str, Any]],
+    ) -> SendResult:
+        """A final reply's text (rich, as any reply) and its files as ONE message; a text too long to
+        ride along, or an upload that fails, posts the text on its own and its files go into its thread."""
+        text = formatted if formatted and formatted.strip() else ""
+        blocks = self._maybe_blocks(content) if text else None
+        rides = _one_message_text(blocks, text, _one_message_max_bytes(self.config.extra))
+        sent = None
+        if rides is not None:
+            sent = await _upload_as_one_message(self._client_for(chat_id, metadata), chat_id, files, thread_ts, **rides)
+        if sent is not None:
+            await self._notify_unsent(chat_id, sent["unsent"], thread_ts, metadata)
+            message_id = sent["message_id"]
+        else:
+            message_id = None
+            if text:
+                last_result = await self._post_chunks(chat_id, team_id, content, formatted, thread_ts)
+                message_id = last_result.get("ts") if last_result else None
+            files_sent = await self._send_files_only(chat_id, files, thread_ts or message_id, metadata)
+            message_id = message_id or (files_sent or {}).get("message_id")
+        if thread_ts:
+            await self.stop_typing(chat_id, metadata=metadata)
+        self._remember_sent(team_id, message_id, thread_ts)
+        return SendResult(success=True, message_id=message_id)
+
+    async def _send_files_only(self, chat_id: str, files: List[str], thread_ts: Optional[str],
+                               metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """``files`` as one message with no text; each file that does not go up is named in the chat."""
+        if not files:
+            return None
+        sent = await _upload_as_one_message(self._client_for(chat_id, metadata), chat_id, files, thread_ts)
+        await self._notify_unsent(chat_id, sent["unsent"] if sent is not None else files, thread_ts, metadata)
+        return sent
+
+    async def _notify_unsent(self, chat_id: str, paths: List[str], thread_ts: Optional[str],
+                             metadata: Optional[Dict[str, Any]]) -> None:
+        for path in paths:
+            await self._send_failure_notice(chat_id, None, _media_failure_text("file", os.path.basename(path)),
+                                            thread_ts, metadata)
 
     async def _post_chunks(
         self, chat_id: str, team_id: str, content: str, formatted: str, thread_ts: Optional[str]
@@ -6463,20 +6547,23 @@ async def _resolve_slack_user_dm(token: str, user_id: str) -> Optional[str]:
 
 
 def _standalone_post_kwargs(
-    chat_id: str, text: Any, unfurl_kwargs: Dict[str, Any], thread_id: Optional[str]
+    chat_id: str, text: Any, unfurl_kwargs: Dict[str, Any], thread_id: Optional[str], blocks: Optional[list] = None
 ) -> Dict[str, Any]:
     """``chat.postMessage`` kwargs for the standalone senders (key order is the wire order)."""
     kwargs: Dict[str, Any] = {"channel": chat_id, "text": text, "mrkdwn": True, **unfurl_kwargs}
     if thread_id:
         kwargs["thread_ts"] = thread_id
+    if blocks:
+        kwargs["blocks"] = blocks
     return kwargs
 
 
 async def _standalone_post_text(
-    client, chat_id: str, text: Any, unfurl_kwargs: Dict[str, Any], thread_id: Optional[str]
+    client, chat_id: str, text: Any, unfurl_kwargs: Dict[str, Any], thread_id: Optional[str],
+    blocks: Optional[list] = None,
 ) -> Dict[str, Any]:
     """``chat.postMessage`` via the SDK client; returns the response as a plain dict."""
-    kwargs = _standalone_post_kwargs(chat_id, text, unfurl_kwargs, thread_id)
+    kwargs = _standalone_post_kwargs(chat_id, text, unfurl_kwargs, thread_id, blocks)
     return _slack_response_payload(await client.chat_postMessage(**kwargs))
 
 
@@ -6510,7 +6597,7 @@ async def _standalone_upload_file(
     return {"success": True, "message_id": message_id, "raw": result}
 
 
-async def _standalone_message_ts(client, file_obj: Dict[str, Any], chat_id: str) -> Optional[str]:
+async def _message_ts_of_upload(client, file_obj: Dict[str, Any], chat_id: str) -> Optional[str]:
     """ts of the message an upload landed in: ``files.info`` shares (the upload response has none),
     waited for while Slack is still sharing the file."""
     for attempt in range(_SHARE_POLL_ATTEMPTS):
@@ -6529,53 +6616,68 @@ async def _standalone_message_ts(client, file_obj: Dict[str, Any], chat_id: str)
     return None
 
 
-async def _standalone_send_as_one_message(
-    client, chat_id: str, media_files: list, thread_id: Optional[str], comment: str,
+def _one_message_text(blocks: Optional[list], text: str, max_bytes: int) -> Optional[Dict[str, Any]]:
+    """How a text rides in the message carrying files: compact Block Kit (no ``initial_comment``, which
+    would make Slack drop the blocks) or the plain comment; None when it is too long to ride along."""
+    if blocks:
+        encoded = json.dumps(blocks, ensure_ascii=False, separators=(",", ":"))
+        return {"blocks_json": encoded} if len(encoded.encode("utf-8")) <= max_bytes else None
+    return {"comment": text or ""} if len((text or "").encode("utf-8")) <= max_bytes else None
+
+
+def _one_message_max_bytes(extra: Optional[Dict[str, Any]]) -> int:
+    raw = (extra or {}).get("one_message_max_bytes")
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else _ONE_MESSAGE_MAX_BYTES
+
+
+async def _upload_as_one_message(
+    client, chat_id: str, paths: List[str], thread_ts: Optional[str], *,
+    blocks_json: Optional[str] = None, comment: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """``extra.media_in_one_message``: the text and every file as ONE message (files past
-    ``_FILES_PER_UPLOAD`` continue in further messages), answered with that message's ts. None when
-    nothing could go up that way, so the caller sends the usual way."""
+    """Every file in ``paths`` as ONE message carrying ``blocks_json`` or ``comment``; files past
+    ``_FILES_PER_UPLOAD`` continue in further messages inside ``thread_ts``, or inside the first message's
+    thread when it is top-level. Answers ``{"message_id", "warnings", "unsent"}``; None when nothing went
+    up, so the caller sends another way."""
     warnings: List[str] = []
-    paths = []
-    for media_path, _is_voice in media_files:
-        if os.path.exists(media_path):
-            paths.append(media_path)
-        else:
-            warnings.append(f"Media file not found, skipping: {media_path}")
-    if not paths:
+    unsent = [path for path in paths if not os.path.exists(path)]
+    warnings.extend(f"Media file not found, skipping: {path}" for path in unsent)
+    present = [path for path in paths if os.path.exists(path)]
+    if not present:
         return None
     message_id = None
-    for index in range(0, len(paths), _FILES_PER_UPLOAD):
+    for index in range(0, len(present), _FILES_PER_UPLOAD):
+        batch = present[index:index + _FILES_PER_UPLOAD]
         kwargs: Dict[str, Any] = {
-            "channel": chat_id, "initial_comment": comment if index == 0 else "",
-            "file_uploads": [{"file": path, "filename": os.path.basename(path)}
-                             for path in paths[index:index + _FILES_PER_UPLOAD]]}
-        if thread_id:
-            kwargs["thread_ts"] = thread_id
+            "channel": chat_id, "file_uploads": [{"file": path, "filename": os.path.basename(path)} for path in batch]}
+        if index == 0 and blocks_json:
+            kwargs["blocks"] = blocks_json
+        else:
+            kwargs["initial_comment"] = comment if index == 0 else ""
+        batch_thread = thread_ts if index == 0 else (thread_ts or message_id)
+        if batch_thread:
+            kwargs["thread_ts"] = batch_thread
         try:
             payload = _slack_response_payload(await client.files_upload_v2(**kwargs))
         except Exception as e:
             payload = {"ok": False, "error": str(e)}
         if payload.get("ok") is False or not payload.get("files"):
             if index == 0:
-                logger.warning("[Slack] One-message upload failed (%s); sending the usual way",
-                               payload.get("error", "unknown"))
+                logger.warning("[Slack] One-message upload failed (%s)", payload.get("error", "unknown"))
                 return None
             warnings.append(f"Failed to send media batch from file {index + 1}: {payload.get('error', 'unknown')}")
+            unsent.extend(batch)
             continue
         if index == 0:
-            message_id = await _standalone_message_ts(client, payload["files"][0], chat_id)
-    result: Dict[str, Any] = {"success": True, "platform": "slack", "chat_id": chat_id, "message_id": message_id}
-    if warnings:
-        for warning in warnings:
-            logger.warning("[Slack] %s", warning)
-        result["warnings"] = warnings
-    return result
+            message_id = await _message_ts_of_upload(client, payload["files"][0], chat_id)
+    for warning in warnings:
+        logger.warning("[Slack] %s", warning)
+    return {"message_id": message_id, "warnings": warnings, "unsent": unsent}
 
 
 async def _standalone_send_media(
     token: str, chat_id: str, media_files: list, thread_id: Optional[str], formatted: Optional[str],
     formatted_caption: Optional[str], unfurl_kwargs: Dict[str, Any], *, one_message: bool = False,
+    blocks: Optional[list] = None, max_bytes: int = _ONE_MESSAGE_MAX_BYTES,
 ) -> Dict[str, Any]:
     """Media branch of ``_standalone_send``: ``files_upload_v2`` per file (+ optional text post).
     ``caption`` rides as ``initial_comment`` on the first successful upload unless
@@ -6592,10 +6694,22 @@ async def _standalone_send_media(
     client = _AsyncWebClient(token=token)
     _apply_slack_proxy(client, resolve_proxy_url())
     if one_message and not unfurl_kwargs:
-        sent = await _standalone_send_as_one_message(
-            client, chat_id, media_files, thread_id, formatted_caption or formatted or "")
+        text = formatted_caption or formatted or ""
+        paths = [media_path for media_path, _is_voice in media_files]
+        rides = _one_message_text(blocks, text, max_bytes)
+        sent = await _upload_as_one_message(client, chat_id, paths, thread_id, **rides) if rides is not None else None
+        if sent is None:
+            text_post = await _standalone_post_text(client, chat_id, text, unfurl_kwargs, thread_id, blocks=blocks)
+            text_ts = text_post.get("ts") if text_post.get("ok", True) else None
+            files = await _upload_as_one_message(client, chat_id, paths, thread_id or text_ts)
+            sent = {"message_id": text_ts or (files or {}).get("message_id"),
+                    "warnings": (files or {}).get("warnings", []) or ([] if files else ["Failed to send the files"])}
         if sent is not None:
-            return sent
+            result: Dict[str, Any] = {"success": True, "platform": "slack", "chat_id": chat_id,
+                                      "message_id": sent["message_id"]}
+            if sent["warnings"]:
+                result["warnings"] = sent["warnings"]
+            return result
     last_message_id = None
     # The upload API cannot carry unfurl controls; explicit ones need a separate caption post.
     caption_as_upload_comment = bool(formatted_caption) and not unfurl_kwargs
@@ -6653,6 +6767,19 @@ async def _standalone_send_media(
     return result
 
 
+def _standalone_blocks(pconfig, text: Optional[str]) -> Optional[list]:
+    """The Block Kit a live reply of ``text`` would carry, built without a live adapter."""
+    if not text:
+        return None
+    try:
+        shell = SlackAdapter.__new__(SlackAdapter)
+        shell.config = pconfig
+        return shell._maybe_blocks(text)
+    except Exception:
+        logger.debug("Failed to build Slack blocks in _standalone_send", exc_info=True)
+        return None
+
+
 def _standalone_format_mrkdwn(text: str) -> str:
     """``format_message`` without a live adapter; falls back to the raw text."""
     if not text:
@@ -6700,9 +6827,11 @@ async def _standalone_send(
     formatted_caption = _standalone_format_mrkdwn(caption) if caption else caption
     unfurl_kwargs = _slack_unfurl_kwargs(getattr(pconfig, "extra", None))
     if media_files:
+        extra = getattr(pconfig, "extra", None) or {}
         return await _standalone_send_media(
             token, chat_id, media_files, thread_id, formatted, formatted_caption, unfurl_kwargs,
-            one_message=bool((getattr(pconfig, "extra", None) or {}).get("media_in_one_message")))
+            one_message=bool(extra.get("media_in_one_message")), blocks=_standalone_blocks(pconfig, caption or message),
+            max_bytes=_one_message_max_bytes(extra))
     # --- Text-only path (existing aiohttp chat.postMessage) ---
     if not formatted or not formatted.strip():
         logger.debug("[Slack] _standalone_send: skipping empty/whitespace message")

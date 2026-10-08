@@ -1637,6 +1637,7 @@ class _ExtractedResponse:
     local_files: list
     force_document_attachments: bool
     pre_extract: str
+    dropped_media: list = field(default_factory=list)
 
 
 _PLAINTEXT_GATEWAY_RESTART_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -4384,6 +4385,29 @@ class BasePlatformAdapter(ABC):
                 "[%s] Failed to send error notification to user: %s", self.name, notify_err, exc_info=True)
         return _thread_metadata
 
+    def _attach_files_to_final_text(
+        self, extracted: "_ExtractedResponse", metadata: Optional[Dict[str, Any]], is_ephemeral_response: bool,
+    ) -> "tuple[Optional[Dict[str, Any]], _ExtractedResponse]":
+        """The final text's send metadata and the attachments still to deliver after it. A platform
+        that posts a reply's files in the same message as its text moves them into the metadata;
+        by default nothing moves."""
+        return metadata, extracted
+
+    def _reports_dropped_media(self) -> bool:
+        """Whether a MEDIA file the reply asked for but delivery refused is named in the chat."""
+        return False
+
+    async def _report_dropped_media(self, event: MessageEvent, dropped: list,
+                                    metadata: Optional[Dict[str, Any]]) -> None:
+        """Name each refused MEDIA file in the chat with the usual "couldn't deliver" notice (the
+        host path never shown), when the platform reports them."""
+        if not dropped or not self._reports_dropped_media():
+            return
+        for item in dropped:
+            name = os.path.basename(str(item.get("path") or "")) or None
+            await self.emit_media_warning(event.source.chat_id, _media_failure_text("file", name),
+                                          metadata=metadata, shown_metadata=metadata)
+
     async def _deliver_attachments(self, event: MessageEvent, extracted: "_ExtractedResponse",
                                    metadata: Dict[str, Any], *, anything_sent: bool,
                                    record_delivery: Callable) -> None:
@@ -4399,6 +4423,7 @@ class BasePlatformAdapter(ABC):
             event, media_files, local_files,
             force_document_attachments=extracted.force_document_attachments,
             human_delay=human_delay, metadata=metadata, record_delivery=record_delivery)
+        await self._report_dropped_media(event, extracted.dropped_media, metadata)
         if not (anything_sent or images or local_files or media_files) and extracted.pre_extract.strip():
             logger.error("[%s] response_delivery_dropped: non-empty response "
                          "(%d chars) produced no delivered message or attachment "
@@ -4431,7 +4456,8 @@ class BasePlatformAdapter(ABC):
         # are gone too: the chat-scoped cache and the sandbox fetch resolve from the producing session.
         with self._media_delivery_scope(event.source), self._delivering_session_scope(event.source, session_key):
             media_files, response = self.extract_media(response)
-            media_files = self.filter_media_delivery_paths(media_files, session_key=session_key)
+            dropped_media: list = []
+            media_files = self.filter_media_delivery_paths(media_files, session_key=session_key, dropped=dropped_media)
             images, text_content = self.extract_images(response)
             # Strip any remaining internal directives from message body (fixes #1561). _strip_media_directives
             # shares MEDIA_TAG_CLEANUP_RE, so a MEDIA: tag with an unknown extension is intentionally left in
@@ -4466,7 +4492,8 @@ class BasePlatformAdapter(ABC):
                 text_content = _recovered
         return _ExtractedResponse(
             text_content=text_content, images=images, media_files=media_files,
-            local_files=local_files, force_document_attachments=force_document, pre_extract=pre_extract)
+            local_files=local_files, force_document_attachments=force_document, pre_extract=pre_extract,
+            dropped_media=dropped_media)
 
     async def _fire_post_delivery_callback(self, session_key: str, interrupt_event: asyncio.Event) -> None:
         """Run the one-shot post-delivery callback (bounded, errors swallowed). The generation is
@@ -4573,8 +4600,10 @@ class BasePlatformAdapter(ABC):
                         or _tts_paths or _tts_caption_delivered:
                     self.pause_typing_for_chat(event.source.chat_id)
                 if text_content and not _tts_caption_delivered:
+                    _final_text_metadata, extracted = self._attach_files_to_final_text(
+                        extracted, _final_thread_metadata, is_ephemeral_response)
                     await self._send_final_text(
-                        event, session_key, text_content, _final_thread_metadata,
+                        event, session_key, text_content, _final_text_metadata,
                         is_ephemeral_response, _ephemeral_ttl, _record_delivery)
                 await self._deliver_attachments(
                     event, extracted, _final_thread_metadata,
