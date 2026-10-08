@@ -609,26 +609,79 @@ def _looks_like_image(data: bytes) -> bool:
                or (data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP"))
 
 
-def _write_cache_file(cache_dir: Path, prefix: str, ext: str, data: bytes) -> str:
-    """Write ``data`` to ``<cache_dir>/<prefix>_<uuid12><ext>``; return the path string."""
+# A file kept under a stable key lives alone in ``<cache_dir>/kept_<key>/`` (one folder level, like the
+# fetched-copy folders, so the age sweep reaches it); the key is the identity, the file keeps its name.
+KEPT_MEDIA_DIR_PREFIX = "kept_"
+_KEPT_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+
+
+def _kept_folder(cache_dir: Path, key: str) -> Path:
+    """``<cache_dir>/kept_<key>``; ValueError unless *key* is one plain name (no separators, dots-only
+    or control characters), so a key can never leave *cache_dir*."""
+    if not isinstance(key, str) or not _KEPT_KEY.fullmatch(key) or key.strip(".") == "":
+        raise ValueError(f"Not a plain cache key: {key!r}")
+    return cache_dir / f"{KEPT_MEDIA_DIR_PREFIX}{key}"
+
+
+def find_kept_cache_file(cache_dir: Path, key: str) -> Optional[str]:
+    """The file kept under *key* in *cache_dir*, or None; finding it refreshes its age so the sweep
+    spares a file still in use. A symlinked folder or file is never followed."""
+    folder = _kept_folder(cache_dir, key)
+    if folder.is_symlink() or not folder.is_dir():
+        return None
+    for entry in sorted(folder.iterdir()):
+        if entry.is_file() and not entry.is_symlink():
+            with contextlib.suppress(OSError):
+                os.utime(entry)
+            return str(entry)
+    return None
+
+
+def _kept_name(stem: Optional[str], fallback: str) -> str:
+    """A file name without directory parts, null bytes or control characters."""
+    name = re.sub(r"[\x00-\x1f/\\]", "", Path(stem or "").name).strip()
+    return name if name.strip(".") else fallback
+
+
+def _write_kept_file(cache_dir: Path, key: str, name: str, data: bytes) -> str:
+    """Write *data* as ``kept_<key>/<name>`` atomically (a half-written file is never found)."""
+    folder = _kept_folder(cache_dir, key)
+    if folder.is_symlink():
+        raise ValueError(f"Refusing a symlinked cache folder: {folder.name}")
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / name
+    staging = folder / f".{name}.{uuid.uuid4().hex[:8]}.part"
+    staging.write_bytes(data)
+    os.replace(staging, target)
+    return str(target)
+
+
+def _write_cache_file(cache_dir: Path, prefix: str, ext: str, data: bytes, kept: Optional[str] = None,
+                      stem: Optional[str] = None) -> str:
+    """Write ``data`` to ``<cache_dir>/<prefix>_<uuid12><ext>``, or with *kept* to
+    ``kept_<kept>/<stem><ext>``; return the path string."""
+    if kept is not None:
+        return _write_kept_file(cache_dir, kept, f"{_kept_name(stem, prefix)}{ext}", data)
     filepath = cache_dir / f"{prefix}_{uuid.uuid4().hex[:12]}{ext}"
     filepath.write_bytes(data)
     return str(filepath)
 
 
-def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
+def cache_image_from_bytes(data: bytes, ext: str = ".jpg", kept: Optional[str] = None,
+                           stem: Optional[str] = None) -> str:
     """Save raw image bytes to the cache and return the absolute path; raises
     ValueError when *data* isn't an image (e.g. an upstream HTML error page)."""
     validate_inbound_media_size(len(data), media_type="image")
     if not _looks_like_image(data):
         snippet = data[:80].decode("utf-8", errors="replace")
         raise ValueError(f"Refusing to cache non-image data as {ext} (starts with: {snippet!r})")
-    return _write_cache_file(get_image_cache_dir(), "img", ext, data)
+    return _write_cache_file(get_image_cache_dir(), "img", ext, data, kept, stem)
 
 
-async def cache_image_from_bytes_async(data: bytes, ext: str = ".jpg") -> str:
+async def cache_image_from_bytes_async(data: bytes, ext: str = ".jpg", kept: Optional[str] = None,
+                                       stem: Optional[str] = None) -> str:
     """Cache image bytes without blocking the caller's event loop."""
-    return await asyncio.to_thread(cache_image_from_bytes, data, ext)
+    return await asyncio.to_thread(cache_image_from_bytes, data, ext, *(() if kept is None else (kept, stem)))
 
 
 async def _cache_media_from_url(url: str, ext: str, retries: int, *, media_type: str, accept: str,
@@ -682,7 +735,7 @@ def _cleanup_cache_dir(cache_dir: Path, max_age_hours: int) -> int:
     chats = cache_dir / "chats"
     for directory in (cache_dir, *(d for d in (chats.iterdir() if chats.is_dir() else ()) if d.is_dir())):
         for entry in directory.iterdir():
-            fetched = (entry.name.startswith(FETCHED_MEDIA_DIR_PREFIX) and entry.is_dir()
+            fetched = (entry.name.startswith((FETCHED_MEDIA_DIR_PREFIX, KEPT_MEDIA_DIR_PREFIX)) and entry.is_dir()
                        and not entry.is_symlink())
             for f in (entry.iterdir() if fetched else (entry,)):
                 if f.is_file() and f.stat().st_mtime < cutoff:
@@ -701,17 +754,19 @@ get_audio_cache_dir, cleanup_audio_cache = _cache_dir_accessors(
     "audio", "AUDIO_CACHE_DIR", "cache/audio", "audio_cache")
 
 
-def cache_audio_from_bytes(data: bytes, ext: str = ".ogg") -> str:
+def cache_audio_from_bytes(data: bytes, ext: str = ".ogg", kept: Optional[str] = None,
+                           stem: Optional[str] = None) -> str:
     """Save raw audio bytes to the cache (container-sniffed ext); return the path."""
     # tools.audio_container is the ONE owner of container detection (outbound TTS repair + here).
     from tools.audio_container import sniff_audio_ext
     validate_inbound_media_size(len(data), media_type="audio")
-    return _write_cache_file(get_audio_cache_dir(), "audio", sniff_audio_ext(data, ext), data)
+    return _write_cache_file(get_audio_cache_dir(), "audio", sniff_audio_ext(data, ext), data, kept, stem)
 
 
-async def cache_audio_from_bytes_async(data: bytes, ext: str = ".ogg") -> str:
+async def cache_audio_from_bytes_async(data: bytes, ext: str = ".ogg", kept: Optional[str] = None,
+                                       stem: Optional[str] = None) -> str:
     """Cache audio bytes without blocking the caller's event loop."""
-    return await asyncio.to_thread(cache_audio_from_bytes, data, ext)
+    return await asyncio.to_thread(cache_audio_from_bytes, data, ext, *(() if kept is None else (kept, stem)))
 
 
 async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) -> str:
@@ -731,15 +786,17 @@ SUPPORTED_VIDEO_TYPES = {
     ".mkv": "video/x-matroska", ".avi": "video/x-msvideo"}
 
 
-def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
+def cache_video_from_bytes(data: bytes, ext: str = ".mp4", kept: Optional[str] = None,
+                           stem: Optional[str] = None) -> str:
     """Save raw video bytes to the cache and return the absolute file path."""
     validate_inbound_media_size(len(data), media_type="video")
-    return _write_cache_file(get_video_cache_dir(), "video", ext, data)
+    return _write_cache_file(get_video_cache_dir(), "video", ext, data, kept, stem)
 
 
-async def cache_video_from_bytes_async(data: bytes, ext: str = ".mp4") -> str:
+async def cache_video_from_bytes_async(data: bytes, ext: str = ".mp4", kept: Optional[str] = None,
+                                       stem: Optional[str] = None) -> str:
     """Cache video bytes without blocking the caller's event loop."""
-    return await asyncio.to_thread(cache_video_from_bytes, data, ext)
+    return await asyncio.to_thread(cache_video_from_bytes, data, ext, *(() if kept is None else (kept, stem)))
 
 
 # Document / screenshot cache utilities (same pattern; referenced by local path).
@@ -1511,14 +1568,17 @@ def _strip_media_tag_directives(text: str) -> str:
     return _delete_spans(cleaned, _deliverable_tag_spans(cleaned))
 
 
-def cache_document_from_bytes(data: bytes, filename: str) -> str:
-    """Save raw document bytes to the cache as ``doc_{uuid12}_{original_name}`` and return
-    the absolute path; raises ValueError if the sanitized path escapes the cache directory."""
+def cache_document_from_bytes(data: bytes, filename: str, kept: Optional[str] = None) -> str:
+    """Save raw document bytes to the cache as ``doc_{uuid12}_{original_name}`` (with *kept*:
+    ``kept_<kept>/<original_name>``) and return the absolute path; raises ValueError if the
+    sanitized path escapes the cache directory."""
     cache_dir = get_document_cache_dir()
     # Sanitize: strip directory components, null bytes, and control characters
     safe_name = (Path(filename).name if filename else "document").replace("\x00", "").strip()
     if not safe_name or safe_name in {".", ".."}:
         safe_name = "document"
+    if kept is not None:
+        return _write_kept_file(cache_dir, kept, _kept_name(safe_name, "document"), data)
     filepath = cache_dir / f"doc_{uuid.uuid4().hex[:12]}_{safe_name}"
     # Final safety check: ensure path stays inside cache dir
     if not filepath.resolve().is_relative_to(cache_dir.resolve()):
@@ -1527,9 +1587,9 @@ def cache_document_from_bytes(data: bytes, filename: str) -> str:
     return str(filepath)
 
 
-async def cache_document_from_bytes_async(data: bytes, filename: str) -> str:
+async def cache_document_from_bytes_async(data: bytes, filename: str, kept: Optional[str] = None) -> str:
     """Cache document bytes without blocking the caller's event loop."""
-    return await asyncio.to_thread(cache_document_from_bytes, data, filename)
+    return await asyncio.to_thread(cache_document_from_bytes, data, filename, *(() if kept is None else (kept,)))
 
 
 # Unified media caching: classify attachment bytes by ext/MIME, route to cache_*_from_bytes.
