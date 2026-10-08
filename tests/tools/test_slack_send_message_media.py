@@ -245,6 +245,7 @@ def test_more_files_than_one_upload_takes_continue_in_further_messages_without_t
         assert [len(upload["file_uploads"]) for upload in uploaded] == [_FILES_PER_UPLOAD, 2]
         assert [upload["initial_comment"] for upload in uploaded] == ["many", ""]
         assert result["message_id"] == ONE_MESSAGE_TS
+        assert "thread_ts" not in uploaded[0] and uploaded[1]["thread_ts"] == ONE_MESSAGE_TS
     finally:
         for path in paths:
             os.unlink(path)
@@ -262,15 +263,14 @@ def test_a_missing_file_is_skipped_with_a_warning_and_the_rest_still_go_as_one_m
         os.unlink(path)
 
 
-def test_when_the_one_message_upload_fails_the_text_and_files_go_the_usual_way():
+def test_when_the_one_message_upload_fails_the_text_posts_on_top_and_its_files_try_its_thread():
     path = _tmpfile(".pdf")
     client, uploaded = _one_message_client("D0DM", upload_ok=False)
     try:
         result = _send_one_message(client, "D0DM", "report", [path])
-        assert "file_uploads" in uploaded[0]
-        assert all("file_uploads" not in upload for upload in uploaded[1:]) and len(uploaded) == 2
         client.chat_postMessage.assert_awaited_once()
-        assert result.get("success") is not True or result.get("message_id")
+        assert len(uploaded) == 2 and uploaded[1]["thread_ts"] == "111.222"
+        assert result["success"] is True and result["message_id"] == "111.222" and result["warnings"]
     finally:
         os.unlink(path)
 
@@ -317,3 +317,53 @@ def test_a_share_that_never_appears_leaves_the_send_standing_without_a_ts(monkey
         assert client.files_info.await_count == adapter._SHARE_POLL_ATTEMPTS
     finally:
         os.unlink(path)
+
+
+def test_a_send_from_outside_the_gateway_carries_its_rich_text_with_the_files():
+    import json
+
+    paths = [_tmpfile(".xlsx"), _tmpfile(".csv")]
+    client, uploaded = _one_message_client("D0DM")
+    pconfig = SimpleNamespace(token="xoxb-test", extra={"media_in_one_message": True, "rich_blocks": True})
+    try:
+        with _fake_slack_sdk(client):
+            result = asyncio.run(_standalone_send(pconfig, "D0DM", "**Done**\n\n- table\n- notes",
+                                                  media_files=[(path, False) for path in paths]))
+        [upload] = uploaded
+        assert json.loads(upload["blocks"]) and "initial_comment" not in upload
+        assert [entry["file"] for entry in upload["file_uploads"]] == paths
+        assert result["message_id"] == ONE_MESSAGE_TS
+    finally:
+        for path in paths:
+            os.unlink(path)
+
+
+def test_files_past_one_message_stay_in_the_thread_the_send_was_made_in():
+    from plugins.platforms.slack.adapter import _FILES_PER_UPLOAD
+
+    paths = [_tmpfile(".csv") for _ in range(_FILES_PER_UPLOAD + 1)]
+    client, uploaded = _one_message_client("C0TEAM")
+    try:
+        _send_one_message(client, "C0TEAM", "many", paths, thread_id="111.000")
+        assert [upload["thread_ts"] for upload in uploaded] == ["111.000", "111.000"]
+    finally:
+        for path in paths:
+            os.unlink(path)
+
+
+def test_a_text_too_long_to_ride_along_posts_on_top_and_its_files_go_into_its_thread():
+    paths = [_tmpfile(".csv")]
+    client, uploaded = _one_message_client("C0TEAM")
+    pconfig = SimpleNamespace(token="xoxb-test", extra={"media_in_one_message": True, "rich_blocks": True,
+                                                        "one_message_max_bytes": 10})
+    try:
+        with _fake_slack_sdk(client):
+            result = asyncio.run(_standalone_send(pconfig, "C0TEAM", "**Done**\n\n- a long report",
+                                                  media_files=[(path, False) for path in paths]))
+        client.chat_postMessage.assert_awaited_once()
+        assert "thread_ts" not in client.chat_postMessage.await_args.kwargs
+        [upload] = uploaded
+        assert upload["thread_ts"] == "111.222" and result["message_id"] == "111.222"
+    finally:
+        for path in paths:
+            os.unlink(path)
