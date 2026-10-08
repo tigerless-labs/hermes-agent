@@ -91,6 +91,27 @@ def _kanban_stop_nudge(agent, messages) -> Optional[str]:
         return None
 
 
+_REPLY_REQUIRED_NUDGE = "[System: The last message is addressed to you. Reply to it.]"
+
+
+def _reply_required_nudge(agent, final_response) -> Optional[str]:
+    """``agent.reply_required_nudge``: a turn the gateway marked as one that must be answered
+    (``agent._reply_required``) and that ended on a bare silence marker is asked once to reply."""
+    if not getattr(agent, "_reply_required", False) or getattr(agent, "_reply_required_nudges", 0):
+        return None
+    try:
+        from gateway.response_filters import is_intentional_silence_response
+        from hermes_cli.config import load_config_readonly
+
+        if not is_intentional_silence_response(final_response):
+            return None
+        agent_cfg = (load_config_readonly() or {}).get("agent") or {}
+        return _REPLY_REQUIRED_NUDGE if agent_cfg.get("reply_required_nudge") is True else None
+    except Exception:
+        logger.debug("reply-required nudge check failed", exc_info=True)
+        return None
+
+
 def _append_interim_answer(agent, final_msg, messages, conversation_history, flush_fail_msg: str) -> None:
     """Real content: persist and emit as interim so the user sees the attempted answer;
     only the nudge is flagged synthetic (#65919)."""
@@ -107,8 +128,8 @@ def apply_stop_gates(
     conversation_history: Any, pending_verification_response: Any,
     pending_verification_response_previewed: Any,
 ) -> StopGateVerdict:
-    """Run verify-on-stop → pre_verify hook → kanban stop guard, in that order. Nudges
-    are user-role rows appended only after the assistant answer row, so role alternation
+    """Run verify-on-stop → pre_verify hook → kanban stop guard → reply-required nudge, in that
+    order. Nudges are user-role rows appended only after the assistant answer row, so role alternation
     holds. Hook lookups are imported lazily from their origin modules (tests patch them
     there)."""
 
@@ -168,6 +189,14 @@ def apply_stop_gates(
             "(kanban_complete/kanban_request_review/kanban_block) — nudging to finish"
         )
         return verdict
+
+    _reply_nudge = _reply_required_nudge(agent, final_response)
+    if _reply_nudge:
+        agent._reply_required_nudges = 1
+        final_msg["_reply_required_synthetic"] = True
+        append_message(messages, final_msg)
+        logger.info("reply-required nudge issued after a bare silence marker")
+        return _continue(_reply_nudge, "_reply_required_synthetic")
     return StopGateVerdict(
         continue_turn=False, final_response=final_response,
         pending_verification_response=pending_verification_response,

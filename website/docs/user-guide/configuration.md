@@ -1265,6 +1265,15 @@ When a budget is set, two things happen:
 
 The budget is per `run_conversation` turn (it resets on each user message) and the feature is completely dormant when unset — no clock reads, no injection, no timeout changes.
 
+## Reply-required nudge
+
+A turn whose message must be answered (the platform adapter marked it as addressed to the bot, e.g. an @mention or a 1:1 DM) that ends on a bare silence marker (`NO_REPLY`) is asked once more to reply before the gateway's fallback notice is sent. The marker and the reminder never reach the stored transcript.
+
+```yaml
+agent:
+  reply_required_nudge: false   # true = one reminder per turn after a bare silence marker
+```
+
 ## Verify-on-Stop (coding verification)
 
 When enabled, Hermes refuses to accept a final answer on a turn where the agent edited code in a workspace but produced no fresh verification evidence (a passing test run, build, lint, etc.) — it injects a synthetic follow-up asking the agent to verify or explain why it can't. Doc/markdown/skill-only edits never trigger it, and the loop is bounded so it can never trap the agent.
