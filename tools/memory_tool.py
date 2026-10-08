@@ -164,6 +164,12 @@ def destructive_ops(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [op for op in ops if (op or {}).get("action") in _BG_DELETE_ACTIONS]
 
 
+def background_review_edits_allowed() -> bool:
+    """``memory.background_review_edits``: the unattended review fork may also replace/remove,
+    applied to its own store like a foreground write. Unset, unclear or unreadable -> off."""
+    return is_truthy_value(get_builtin_memory_config().get("background_review_edits"), default=False)
+
+
 def _background_delete_gate(store, action, operations, target="memory", content=None,
                             old_text=None) -> Optional[str]:
     """Fail-closed operation gate for unattended background-review forks (#105921): ``add``
@@ -171,10 +177,11 @@ def _background_delete_gate(store, action, operations, target="memory", content=
     single or inside a batch — are never applied unattended. The op is staged in the pending
     store instead of merely denied: the fork's own review summary is never published back, so
     a plain denial would drop the consolidation request with no surfacing path at all. A
-    staging failure fails closed to a plain denial."""
+    staging failure fails closed to a plain denial. ``memory.background_review_edits`` lifts
+    the gate for deployments with no approval surface (e.g. per-chat memory on a chat platform)."""
     from tools.skill_provenance import is_unattended_review
 
-    if not is_unattended_review():
+    if not is_unattended_review() or background_review_edits_allowed():
         return None
     payload = ({"action": "batch", "target": target, "operations": operations}
                if operations is not None else

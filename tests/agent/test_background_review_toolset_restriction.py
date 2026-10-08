@@ -15,6 +15,8 @@ that caused the prefix-cache miss.
 
 from unittest.mock import patch
 
+import pytest
+
 
 def _make_agent_stub(agent_cls):
     """Create a minimal AIAgent-like object with just enough state for _spawn_background_review."""
@@ -265,3 +267,29 @@ def test_background_review_whitelist_includes_configured_extra_tools(
     assert "propose_shared_memory" in captured["review_prompt"]
 
 
+
+
+@pytest.mark.parametrize("edits_allowed", [True, False])
+def test_deny_message_states_the_memory_operations_the_review_may_use(monkeypatch, edits_allowed):
+    """The deny message redirects the model to memory; it must not claim add-only when
+    ``memory.background_review_edits`` lets the review replace and remove too."""
+    import run_agent
+    from hermes_cli import plugins as _plugins
+
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly",
+                        lambda: {"memory": {"background_review_edits": edits_allowed}})
+    captured = {}
+
+    def _capture_whitelist(whitelist, deny_msg_fmt=None):
+        captured["deny_msg_fmt"] = deny_msg_fmt
+        raise RuntimeError("stop after capturing whitelist")
+
+    agent = _make_agent_stub(run_agent.AIAgent)
+    with patch.object(run_agent.AIAgent, "__init__", lambda self, *args, **kwargs: None), \
+         patch.object(_plugins, "set_thread_tool_whitelist", _capture_whitelist), \
+         patch("threading.Thread", _SyncThread):
+        agent._spawn_background_review(messages_snapshot=[], review_memory=True, review_skills=False)
+
+    deny = captured["deny_msg_fmt"]
+    assert "memory for notes" in deny
+    assert ("(add only)" in deny) is not edits_allowed
