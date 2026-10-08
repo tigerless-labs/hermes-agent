@@ -1039,6 +1039,8 @@ class SlackAdapter(BasePlatformAdapter):
     _STATUS_MESSAGE_IDS_MAX = 2000
     _THREAD_CACHE_MAX = 2500
     _THREAD_CACHE_TTL = 60.0
+    _THREAD_PEOPLE_MAX = 2000
+    _THREAD_PEOPLE_SEED_LIMIT = 200
     # Watchdog: poll interval; reconnect after N ping_intervals of silence (Slack pings idle
     # sockets, so silence = wedged transport); grace after (re)connect for the first ping/pong.
     _socket_watchdog_interval_s = 15.0
@@ -1107,6 +1109,9 @@ class SlackAdapter(BasePlatformAdapter):
         # long retry loops used to spam threads with dozens of out-of-order status messages.
         self._status_message_ids: Dict[Tuple[str, str, str], str] = {}
         self._thread_context_cache: Dict[str, _ThreadContextCache] = {}
+        # (team_id, channel_id, thread_ts) → Slack ids that spoke in or were @mentioned in the thread
+        # (``thread_reply_judgement``); seeded once from its history, then kept from each message.
+        self._thread_people: Dict[Tuple[str, str, str], set] = {}
         # Threads already rehydration-checked this process (first reply after a restart injects
         # missed messages exactly once); message IDs with reaction lifecycle (bounded: an exception
         # between add and finalize would leak entries).
@@ -4380,7 +4385,9 @@ class SlackAdapter(BasePlatformAdapter):
         so prompt caching holds) so it won't read a human's mention as a self-mention."""
         from gateway.platforms.base import resolve_channel_prompt
         channel_prompt = resolve_channel_prompt(self.config.extra, channel_id, None)
-        identity_prompt = self._build_identity_prompt(team_id)
+        identity_prompt = (
+            self._judgement_identity_prompt(channel_id, team_id)
+            if self._slack_thread_reply_judgement() else self._build_identity_prompt(team_id))
         if identity_prompt:
             channel_prompt = (
                 f"{identity_prompt}\n\n{channel_prompt}".strip()
@@ -4521,7 +4528,7 @@ class SlackAdapter(BasePlatformAdapter):
         bot_uid: str, thread_ts: Optional[str], team_id: str) -> Tuple[str, str, str, bool]:
         """Strip our mention, re-probe for a command hidden behind it, remember the thread.
         Returns updated ``(text, original_text, command_probe_text, is_command_text)``."""
-        text = text.replace(f"<@{bot_uid}>", "").strip()
+        text = text.replace(f"<@{bot_uid}>", self._own_mention_label(team_id)).strip()
         # Re-probe commands on the canonical text (block-augmented text would leak quoted text
         # into arguments): handles ``@bot !cmd`` / ``@bot /cmd``.
         mention_stripped = original_text.replace(f"<@{bot_uid}>", "").strip()
@@ -4640,9 +4647,13 @@ class SlackAdapter(BasePlatformAdapter):
             is_command_text=is_command_text, channel_id=channel_id, team_id=team_id, ts=ts,
             user_id=user_id, thread_ts=thread_ts, is_dm=is_dm, media_urls=media_urls,
             media_types=media_types, media_text_inlined=media_text_inlined, channel_context=channel_context,
-            reply_expected=self._slack_reply_expected(
-                routing_text, bot_uid, channel_id=channel_id, opens_own_session=thread_ts == ts,
-                addressed=is_one_to_one_dm or is_mentioned or is_command_text or force_process))
+            reply_expected=await self._judged_reply_expected(
+                self._slack_reply_expected(
+                    routing_text, bot_uid, channel_id=channel_id, opens_own_session=thread_ts == ts,
+                    addressed=is_one_to_one_dm or is_mentioned or is_command_text or force_process),
+                judged=is_thread_reply and not is_one_to_one_dm, channel_id=channel_id,
+                thread_ts=event_thread_ts, team_id=team_id, user_id=user_id, text=routing_text,
+                bot_uid=bot_uid))
         # React only when directly addressed; MPIMs are shared, so they need a
         # mention like any channel.
         if (is_one_to_one_dm or is_mentioned) and self._reactions_enabled():
@@ -6360,6 +6371,10 @@ class SlackAdapter(BasePlatformAdapter):
         "ignore_other_user_mentions", "SLACK_IGNORE_OTHER_USER_MENTIONS")
     _slack_thread_require_mention = _extra_or_env_flag_getter(
         "thread_require_mention", "SLACK_THREAD_REQUIRE_MENTION")
+    # thread_reply_judgement: in a thread with someone besides the sender and the bot, a message
+    # that does not @mention the bot may stay silent; the bot's own @mention stays visible.
+    _slack_thread_reply_judgement = _extra_or_env_flag_getter(
+        "thread_reply_judgement", "SLACK_THREAD_REPLY_JUDGEMENT")
     _slack_disable_dms = _extra_or_env_flag_getter("disable_dms", "SLACK_DISABLE_DMS", strip=True)
 
     def _slack_message_addressed_to_other_user(self, text: str, self_uids: set) -> bool:
@@ -6388,6 +6403,83 @@ class SlackAdapter(BasePlatformAdapter):
         if self._slack_message_addressed_to_other_user(routing_text, self_uids):
             return False
         return False if opens_own_session and self._slack_is_free_channel(channel_id) else None
+
+    async def _judged_reply_expected(
+        self, reply_expected: Optional[bool], *, judged: bool, channel_id: str, thread_ts: str,
+        team_id: str, user_id: str, text: str, bot_uid: Optional[str]) -> Optional[bool]:
+        """``thread_reply_judgement``: a thread follow-up the upstream rule leaves undecided (None)
+        may stay silent only while someone besides the sender and the bot is in the thread, and
+        must be answered when no one is or the thread cannot be read. Off, ``reply_expected``."""
+        if not (judged and self._slack_thread_reply_judgement()):
+            return reply_expected
+        has_others = await self._thread_has_others(
+            channel_id=channel_id, thread_ts=thread_ts, team_id=team_id, user_id=user_id, text=text,
+            self_uids={u for u in (bot_uid, self._bot_user_id) if u})
+        return (has_others is not True) if reply_expected is None else reply_expected
+
+    async def _thread_has_others(
+        self, *, channel_id: str, thread_ts: str, team_id: str, user_id: str, text: str,
+        self_uids: set) -> Optional[bool]:
+        """Whether anyone besides ``user_id`` and the bot spoke in or was @mentioned in the thread;
+        other bots' messages do not count. Read once from the thread's history, then kept current
+        from each admitted message; None when that history cannot be read."""
+        key = self._workspace_thread_key(team_id, channel_id, thread_ts)
+        people = self._thread_people.get(key)
+        if people is None:
+            try:
+                history = await self._conversations_replies_with_backoff(
+                    channel_id, thread_ts, self._THREAD_PEOPLE_SEED_LIMIT, team_id)
+            except Exception:
+                logger.debug("[Slack] thread history for reply judgement unavailable", exc_info=True)
+                return None
+            if history is None:
+                return None
+            people = set()
+            for msg in history.get("messages") or []:
+                if msg.get("user") and not self._event_declares_bot_sender(msg):
+                    people.add(msg["user"])
+                people |= self._addressed_people(msg.get("text") or "")
+            self._thread_people[key] = people
+            self._evict_oldest_by_ts(self._thread_people, self._THREAD_PEOPLE_MAX, lambda k: k[2])
+        if user_id:
+            people.add(user_id)
+        people |= self._addressed_people(text)
+        return bool(people - {user_id, *self_uids})
+
+    @staticmethod
+    def _addressed_people(text: str) -> set:
+        """What a message @mentions: user ids (``<@U1>``, ``<@U1|name>``), user-group ids
+        (``<!subteam^S1>``) and the room-wide ``<!here>``, ``<!channel>``, ``<!everyone>``."""
+        if not text:
+            return set()
+        users = re.findall(r"<@([A-Z0-9]+)(?:\|[^>]*)?>", text)
+        groups = re.findall(r"<!subteam\^([A-Z0-9]+)(?:\|[^>]*)?>", text)
+        rooms = re.findall(r"<!(everyone|channel|here)(?:\|[^>]*)?>", text, re.IGNORECASE)
+        return {*users, *groups, *(f"!{room.lower()}" for room in rooms)}
+
+    def _own_mention_label(self, team_id: str) -> str:
+        """What the bot's own ``<@id>`` becomes in the text the model reads: ``@name`` under
+        ``thread_reply_judgement`` (the mention marks a message as addressed), else removed."""
+        if not self._slack_thread_reply_judgement():
+            return ""
+        name = ((team_id and self._team_bot_names.get(team_id)) or self._bot_display_name or "").strip()
+        return f"@{name}" if name else ""
+
+    def _judgement_identity_prompt(self, channel_id: str, team_id: str) -> str:
+        """Identity line under ``thread_reply_judgement``: the bot's visible @mention alone marks a
+        message as addressed to it; outside a 1:1 DM (ids starting with D) a message that needs
+        nothing from it may be answered with only a silence marker. Fixed per channel, so the
+        system prompt stays byte-stable."""
+        handle = self._own_mention_label(team_id)
+        if not handle:
+            return ""
+        line = (
+            f'You are connected to this Slack workspace as the bot "{handle}". Mentions appear as '
+            f'@DisplayName: "{handle}" addresses you, and a mention of another participant addresses '
+            f"that person, even if their name is similar.")
+        if channel_id.startswith("D"):
+            return line
+        return f"{line} When a message needs nothing from you, your entire reply is NO_REPLY."
 
     def _slack_message_mentions_self(self, text: str, self_uids: set) -> bool:
         """True when ``text`` @-mentions this bot anywhere, in either ``<@U123>`` or
