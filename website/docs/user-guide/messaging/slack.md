@@ -446,6 +446,9 @@ platforms:
       # Collapse approved command prompts to a single line.
       collapse_resolved_approvals: false
 
+      # From outside the gateway (cron, tools): the text and every file as one message.
+      media_in_one_message: false
+
       # Suggested prompts pinned at the top of Agent view's Messages tab.
       # Either a list of {title, message} rows, or a titled object:
       # {title: "Start here", prompts: [{title: "Plan", message: "..."}]}
@@ -482,6 +485,7 @@ platforms:
 | `platforms.slack.extra.native_task_cards` | `false` | When `true`, renders live tool calls as Slack-native plan/task cards. Cards work with Slack's built-in default `tool_progress: off`; an explicitly configured `display.tool_progress: off` (global or `display.platforms.slack`; `/verbose` writes the same key) disables cards too. Cards need a thread: when the card lane is active and the chat has no thread to anchor on (a top-level DM with `reply_in_thread: false`), Hermes shows no tool progress instead of text bubbles, unless you explicitly set `tool_progress: new`/`all`, which falls back to editable text progress there. Recoverable native API failures fall back to one continuously edited text update. |
 | `platforms.slack.extra.task_card_title` | `"Hermes is working"` | Header of the native task card and of its text fallback. |
 | `platforms.slack.extra.collapse_resolved_approvals` | `false` | When `true`, an approved command prompt is rewritten to one context line naming the decision and a truncated command. Denied and expired prompts keep their full text. |
+| `platforms.slack.extra.media_in_one_message` | `false` | When `true`, a send from outside the gateway process (cron, tools) carries its text and every file as one message (up to 10 files per message), and answers with that message's ts. |
 | `platforms.slack.extra.suggested_prompts` | `[]` | Up to four `{title, message}` prompts for Agent/Assistant DM entry points; accepts either a list or `{title, prompts}`. |
 | `platforms.slack.extra.assistant_thread_titles` | `true` | When `true`, names Agent/Assistant DM threads from the first user message. |
 | `platforms.slack.extra.allow_bots` | `"none"` | Controls messages from other Slack bots: `"none"` ignores them, `"mentions"` accepts a bot message only when **that message itself** @mentions Hermes, and `"all"` accepts all of them. Use `"mentions"` for the safest bot-to-bot collaboration mode. See [Accepting messages from other bots](#accepting-messages-from-other-bots-allow_bots). |

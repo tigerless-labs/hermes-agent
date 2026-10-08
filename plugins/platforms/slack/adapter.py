@@ -994,6 +994,14 @@ def _extra_or_env_channel_set_getter(
     return getter
 
 
+# Slack's cap on files in one ``files_upload_v2`` call.
+_FILES_PER_UPLOAD = 10
+# Slack shares an uploaded file into its message a moment after ``files_upload_v2`` returns; ``files.info``
+# is asked this many times, this far apart, for the share that names the message.
+_SHARE_POLL_ATTEMPTS = 10
+_SHARE_POLL_SECONDS = 0.5
+
+
 class SlackAdapter(BasePlatformAdapter):
     """Slack bot adapter (Socket Mode).
     Needs SLACK_BOT_TOKEN (xoxb-, API calls) and SLACK_APP_TOKEN (xapp-, Socket Mode). DMs +
@@ -2869,8 +2877,7 @@ class SlackAdapter(BasePlatformAdapter):
         except Exception:
             return await super().send_multiple_images(chat_id, images, metadata, human_delay)
         thread_ts = self._resolve_thread_ts(None, metadata)
-        CHUNK = 10
-        chunks = [images[i : i + CHUNK] for i in range(0, len(images), CHUNK)]
+        chunks = [images[i : i + _FILES_PER_UPLOAD] for i in range(0, len(images), _FILES_PER_UPLOAD)]
         delivered = False
         for chunk_idx, chunk in enumerate(chunks):
             if human_delay > 0 and chunk_idx > 0:
@@ -6492,12 +6499,77 @@ async def _standalone_upload_file(
     return {"success": True, "message_id": message_id, "raw": result}
 
 
+async def _standalone_message_ts(client, file_obj: Dict[str, Any], chat_id: str) -> Optional[str]:
+    """ts of the message an upload landed in: ``files.info`` shares (the upload response has none),
+    waited for while Slack is still sharing the file."""
+    for attempt in range(_SHARE_POLL_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(_SHARE_POLL_SECONDS)
+        try:
+            info = _slack_response_payload(await client.files_info(file=file_obj.get("id")))
+        except Exception:
+            logger.warning("[Slack] files.info failed; the upload's message ts is unknown", exc_info=True)
+            return None
+        ts = SlackAdapter._first_file_share(info.get("file") or {}, chat_id).get("ts")
+        if ts:
+            return ts
+    logger.warning("[Slack] Slack had not shared the upload after %d checks; its message ts is unknown",
+                   _SHARE_POLL_ATTEMPTS)
+    return None
+
+
+async def _standalone_send_as_one_message(
+    client, chat_id: str, media_files: list, thread_id: Optional[str], comment: str,
+) -> Optional[Dict[str, Any]]:
+    """``extra.media_in_one_message``: the text and every file as ONE message (files past
+    ``_FILES_PER_UPLOAD`` continue in further messages), answered with that message's ts. None when
+    nothing could go up that way, so the caller sends the usual way."""
+    warnings: List[str] = []
+    paths = []
+    for media_path, _is_voice in media_files:
+        if os.path.exists(media_path):
+            paths.append(media_path)
+        else:
+            warnings.append(f"Media file not found, skipping: {media_path}")
+    if not paths:
+        return None
+    message_id = None
+    for index in range(0, len(paths), _FILES_PER_UPLOAD):
+        kwargs: Dict[str, Any] = {
+            "channel": chat_id, "initial_comment": comment if index == 0 else "",
+            "file_uploads": [{"file": path, "filename": os.path.basename(path)}
+                             for path in paths[index:index + _FILES_PER_UPLOAD]]}
+        if thread_id:
+            kwargs["thread_ts"] = thread_id
+        try:
+            payload = _slack_response_payload(await client.files_upload_v2(**kwargs))
+        except Exception as e:
+            payload = {"ok": False, "error": str(e)}
+        if payload.get("ok") is False or not payload.get("files"):
+            if index == 0:
+                logger.warning("[Slack] One-message upload failed (%s); sending the usual way",
+                               payload.get("error", "unknown"))
+                return None
+            warnings.append(f"Failed to send media batch from file {index + 1}: {payload.get('error', 'unknown')}")
+            continue
+        if index == 0:
+            message_id = await _standalone_message_ts(client, payload["files"][0], chat_id)
+    result: Dict[str, Any] = {"success": True, "platform": "slack", "chat_id": chat_id, "message_id": message_id}
+    if warnings:
+        for warning in warnings:
+            logger.warning("[Slack] %s", warning)
+        result["warnings"] = warnings
+    return result
+
+
 async def _standalone_send_media(
     token: str, chat_id: str, media_files: list, thread_id: Optional[str], formatted: Optional[str],
-    formatted_caption: Optional[str], unfurl_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    formatted_caption: Optional[str], unfurl_kwargs: Dict[str, Any], *, one_message: bool = False,
+) -> Dict[str, Any]:
     """Media branch of ``_standalone_send``: ``files_upload_v2`` per file (+ optional text post).
     ``caption`` rides as ``initial_comment`` on the first successful upload unless
-    link-preview controls are explicit (the upload API cannot carry them)."""
+    link-preview controls are explicit (the upload API cannot carry them). ``one_message``
+    sends the text and every file as one message instead."""
     warnings: List[str] = []
     # Local import: tests inject a fake slack_sdk; a missing install gets a clean error.
     try:
@@ -6508,6 +6580,11 @@ async def _standalone_send_media(
         }
     client = _AsyncWebClient(token=token)
     _apply_slack_proxy(client, resolve_proxy_url())
+    if one_message and not unfurl_kwargs:
+        sent = await _standalone_send_as_one_message(
+            client, chat_id, media_files, thread_id, formatted_caption or formatted or "")
+        if sent is not None:
+            return sent
     last_message_id = None
     # The upload API cannot carry unfurl controls; explicit ones need a separate caption post.
     caption_as_upload_comment = bool(formatted_caption) and not unfurl_kwargs
@@ -6613,7 +6690,8 @@ async def _standalone_send(
     unfurl_kwargs = _slack_unfurl_kwargs(getattr(pconfig, "extra", None))
     if media_files:
         return await _standalone_send_media(
-            token, chat_id, media_files, thread_id, formatted, formatted_caption, unfurl_kwargs)
+            token, chat_id, media_files, thread_id, formatted, formatted_caption, unfurl_kwargs,
+            one_message=bool((getattr(pconfig, "extra", None) or {}).get("media_in_one_message")))
     # --- Text-only path (existing aiohttp chat.postMessage) ---
     if not formatted or not formatted.strip():
         logger.debug("[Slack] _standalone_send: skipping empty/whitespace message")

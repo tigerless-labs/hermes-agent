@@ -416,8 +416,21 @@ def _slack_dm_chat_id(pconfig, chat_id):
     return _run_async(_resolve_slack_user_target(pconfig.token, dm_target))
 
 
+def _mirror_enabled() -> bool:
+    """``send_message.mirror_to_session`` (default on)."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        section = load_config_readonly().get("send_message") or {}
+    except Exception:
+        return True
+    return bool(section.get("mirror_to_session", True)) if isinstance(section, dict) else True
+
+
 def _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
-    """Best-effort mirror of the sent message into the target's gateway session."""
+    """Best-effort mirror of the sent message into the target's gateway session, unless
+    ``send_message.mirror_to_session`` is off."""
+    if not _mirror_enabled():
+        return False
     try:
         from gateway.mirror import mirror_to_session
         from gateway.session_context import get_session_env
