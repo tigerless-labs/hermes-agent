@@ -1797,6 +1797,12 @@ DEFAULT_CONFIG = {
         "allow_lazy_installs": True,
     },
 
+    "send_message": {
+        # Append each message send_message delivers to the target chat's most recently started
+        # session (role assistant). False = the delivery is not written into any session.
+        "mirror_to_session": True,
+    },
+
     "cron": {
         "catch_up_missed": True,  # False skips recurring misses beyond the local grace window.
         # Let cron-spawned agents use the cronjob toolset (the "cron-librarian" pattern). Off by

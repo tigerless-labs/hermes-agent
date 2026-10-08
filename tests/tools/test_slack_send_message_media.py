@@ -174,3 +174,115 @@ def test_send_to_platform_routes_slack_media():
     finally:
         entry.standalone_sender_fn = original
         os.unlink(pdf)
+
+
+ONE_MESSAGE_TS = "555.666"
+
+
+def _one_message_pconfig():
+    return SimpleNamespace(token="xoxb-test", extra={"media_in_one_message": True})
+
+
+def _one_message_client(chat_id: str, *, upload_ok: bool = True):
+    client = _mock_client()
+    uploaded = []
+
+    async def files_upload_v2(**kwargs):
+        uploaded.append(kwargs)
+        if not upload_ok:
+            return {"ok": False, "error": "invalid_arguments"}
+        return {"ok": True, "files": [{"id": f"F{len(uploaded)}{index}"} for index, _ in
+                                      enumerate(kwargs.get("file_uploads") or [kwargs])]}
+
+    async def files_info(file):
+        ts = ONE_MESSAGE_TS if file.startswith("F1") else "later.batch"
+        return {"ok": True, "file": {"id": file, "shares": {"private": {chat_id: [{"ts": ts}]}}}}
+
+    client.files_upload_v2 = AsyncMock(side_effect=files_upload_v2)
+    client.files_info = AsyncMock(side_effect=files_info)
+    return client, uploaded
+
+
+def _send_one_message(client, chat_id, text, paths, **kwargs):
+    with _fake_slack_sdk(client):
+        return asyncio.run(_standalone_send(_one_message_pconfig(), chat_id, text,
+                                            media_files=[(path, False) for path in paths], **kwargs))
+
+
+def test_one_message_carries_the_text_and_every_file_and_answers_with_its_ts():
+    paths = [_tmpfile(suffix) for suffix in (".xlsx", ".csv", ".pdf")]
+    client, uploaded = _one_message_client("D0DM")
+    try:
+        result = _send_one_message(client, "D0DM", "Here are the files", paths)
+        assert result["success"] is True and result["message_id"] == ONE_MESSAGE_TS
+        client.chat_postMessage.assert_not_awaited()
+        [upload] = uploaded
+        assert upload["channel"] == "D0DM" and upload["initial_comment"] == "Here are the files"
+        assert [entry["file"] for entry in upload["file_uploads"]] == paths
+        assert [entry["filename"] for entry in upload["file_uploads"]] == [os.path.basename(p) for p in paths]
+    finally:
+        for path in paths:
+            os.unlink(path)
+
+
+def test_one_message_keeps_the_thread_it_is_sent_into():
+    path = _tmpfile(".pdf")
+    client, uploaded = _one_message_client("C0TEAM")
+    try:
+        _send_one_message(client, "C0TEAM", "report", [path], thread_id="111.000")
+        assert uploaded[0]["thread_ts"] == "111.000"
+    finally:
+        os.unlink(path)
+
+
+def test_more_files_than_one_upload_takes_continue_in_further_messages_without_the_text():
+    from plugins.platforms.slack.adapter import _FILES_PER_UPLOAD
+
+    paths = [_tmpfile(".csv") for _ in range(_FILES_PER_UPLOAD + 2)]
+    client, uploaded = _one_message_client("D0DM")
+    try:
+        result = _send_one_message(client, "D0DM", "many", paths)
+        assert [len(upload["file_uploads"]) for upload in uploaded] == [_FILES_PER_UPLOAD, 2]
+        assert [upload["initial_comment"] for upload in uploaded] == ["many", ""]
+        assert result["message_id"] == ONE_MESSAGE_TS
+    finally:
+        for path in paths:
+            os.unlink(path)
+
+
+def test_a_missing_file_is_skipped_with_a_warning_and_the_rest_still_go_as_one_message():
+    path = _tmpfile(".pdf")
+    missing = path + ".gone"
+    client, uploaded = _one_message_client("D0DM")
+    try:
+        result = _send_one_message(client, "D0DM", "report", [path, missing])
+        assert [entry["file"] for entry in uploaded[0]["file_uploads"]] == [path]
+        assert any(missing in warning for warning in result["warnings"])
+    finally:
+        os.unlink(path)
+
+
+def test_when_the_one_message_upload_fails_the_text_and_files_go_the_usual_way():
+    path = _tmpfile(".pdf")
+    client, uploaded = _one_message_client("D0DM", upload_ok=False)
+    try:
+        result = _send_one_message(client, "D0DM", "report", [path])
+        assert "file_uploads" in uploaded[0]
+        assert all("file_uploads" not in upload for upload in uploaded[1:]) and len(uploaded) == 2
+        client.chat_postMessage.assert_awaited_once()
+        assert result.get("success") is not True or result.get("message_id")
+    finally:
+        os.unlink(path)
+
+
+def test_without_the_switch_text_and_files_stay_separate_messages():
+    paths = [_tmpfile(".pdf"), _tmpfile(".csv")]
+    client, uploaded = _one_message_client("D0DM")
+    try:
+        with _fake_slack_sdk(client):
+            asyncio.run(_standalone_send(_pconfig(), "D0DM", "report", media_files=[(p, False) for p in paths]))
+        client.chat_postMessage.assert_awaited_once()
+        assert len(uploaded) == len(paths) and all("file_uploads" not in upload for upload in uploaded)
+    finally:
+        for path in paths:
+            os.unlink(path)

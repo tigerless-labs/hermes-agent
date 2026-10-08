@@ -1163,6 +1163,18 @@ agent:
   reconnect_attention_after: 7200   # seconds; 0 disables the escalation flag
 ```
 
+## send_message Mirror
+
+Each message `send_message` delivers (a tool call, or a cron run delivering from its own process) is appended to the
+target chat's most recently started session, so that session's agent knows what was sent. On a platform where one chat
+holds many sessions (Slack threads), that may be a session nobody continues in. Turn it off when something else binds
+the delivery to the right session:
+
+```yaml
+send_message:
+  mirror_to_session: false   # default: true
+```
+
 ## Gateway Agent Cache
 
 The gateway keeps one agent per session so a conversation reuses its cached prompt prefix instead of rebuilding the system prompt every turn. That cached agent also holds the session's full transcript — tool output included, which is tens of megabytes on a session with a hundred tool calls. On a busy multi-platform gateway the cache is therefore the largest single consumer of memory in the process.
