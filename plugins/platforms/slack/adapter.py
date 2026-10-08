@@ -5897,13 +5897,21 @@ class SlackAdapter(BasePlatformAdapter):
             logger.debug("[Slack] Failed to fetch thread parent text: %s", exc)
             return ""
 
+    def _thread_root_file_limit(self) -> int:
+        """``extra.thread_root_files``: how many of the thread root's files, of any kind, reach the
+        first turn in a thread; 0 (unset) keeps the root's images only."""
+        raw = self.config.extra.get("thread_root_files")
+        return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else 0
+
     async def _collect_thread_root_images(
         self, channel_id: str, thread_ts: str, team_id: str = "") -> Tuple[List[str], List[str]]:
         """Thread-root ``image/*`` files → (paths, mimetypes); cold-start only (once per session),
-        read from the cache filled by :meth:`_fetch_thread_context`. Best-effort: text markers
-        already announce the image, so failures never produce an error turn."""
+        read from the cache filled by :meth:`_fetch_thread_context`. With ``extra.thread_root_files``
+        every kind of root file comes along, cached the way an inbound file is. Best-effort: text
+        markers already announce the files, so failures never produce an error turn."""
         media_urls: List[str] = []
         media_types: List[str] = []
+        file_limit = self._thread_root_file_limit()
         try:
             cached = self._thread_context_cache.get(
                 self._thread_cache_key(channel_id, thread_ts, team_id))
@@ -5912,7 +5920,7 @@ class SlackAdapter(BasePlatformAdapter):
             if not isinstance(files, list):
                 return media_urls, media_types
             for f in files:
-                if len(media_urls) >= _THREAD_ROOT_IMAGE_MAX:
+                if len(media_urls) >= (file_limit or _THREAD_ROOT_IMAGE_MAX):
                     break
                 if not isinstance(f, dict):
                     continue
@@ -5923,19 +5931,22 @@ class SlackAdapter(BasePlatformAdapter):
                         continue
                 mimetype = str(f.get("mimetype") or "")
                 url = f.get("url_private_download") or f.get("url_private", "")
-                if not mimetype.startswith("image/") or not url:
+                kind = self._slack_file_kind(f, mimetype)
+                if not url or (kind != "image" and not file_limit):
                     continue
                 try:
-                    cached_path, media_type, _ = await self._cache_slack_file(
-                        "image", f, url, mimetype, team_id)
+                    cached_file = await self._cache_slack_file(kind, f, url, mimetype, team_id)
+                    if cached_file is None:
+                        continue
+                    cached_path, media_type, _ = cached_file
                     media_urls.append(cached_path)
                     media_types.append(media_type)
                 except Exception as exc:
                     logger.warning(
-                        "[Slack] Failed to cache thread-root image %s: %s",
+                        "[Slack] Failed to cache thread-root file %s: %s",
                         f.get("id") or f.get("name") or "unknown", exc)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("[Slack] Thread-root image recovery failed: %s", exc)
+            logger.debug("[Slack] Thread-root file recovery failed: %s", exc)
         return media_urls, media_types
 
     async def _handle_slash_command(self, command: dict) -> None:
