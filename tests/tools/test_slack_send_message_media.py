@@ -286,3 +286,34 @@ def test_without_the_switch_text_and_files_stay_separate_messages():
     finally:
         for path in paths:
             os.unlink(path)
+
+
+def test_a_share_slack_makes_a_moment_after_the_upload_is_waited_for(monkeypatch):
+    from plugins.platforms.slack import adapter
+
+    monkeypatch.setattr(adapter, "_SHARE_POLL_SECONDS", 0)
+    path = _tmpfile(".pdf")
+    client, _ = _one_message_client("D0DM")
+    answers = [{"ok": True, "file": {"id": "F10"}}, {"ok": True, "file": {"id": "F10", "shares": {}}},
+               {"ok": True, "file": {"id": "F10", "shares": {"private": {"D0DM": [{"ts": ONE_MESSAGE_TS}]}}}}]
+    client.files_info = AsyncMock(side_effect=answers)
+    try:
+        assert _send_one_message(client, "D0DM", "report", [path])["message_id"] == ONE_MESSAGE_TS
+        assert client.files_info.await_count == len(answers)
+    finally:
+        os.unlink(path)
+
+
+def test_a_share_that_never_appears_leaves_the_send_standing_without_a_ts(monkeypatch):
+    from plugins.platforms.slack import adapter
+
+    monkeypatch.setattr(adapter, "_SHARE_POLL_SECONDS", 0)
+    path = _tmpfile(".pdf")
+    client, _ = _one_message_client("D0DM")
+    client.files_info = AsyncMock(return_value={"ok": True, "file": {"id": "F10"}})
+    try:
+        result = _send_one_message(client, "D0DM", "report", [path])
+        assert result["success"] is True and result["message_id"] is None
+        assert client.files_info.await_count == adapter._SHARE_POLL_ATTEMPTS
+    finally:
+        os.unlink(path)

@@ -996,6 +996,10 @@ def _extra_or_env_channel_set_getter(
 
 # Slack's cap on files in one ``files_upload_v2`` call.
 _FILES_PER_UPLOAD = 10
+# Slack shares an uploaded file into its message a moment after ``files_upload_v2`` returns; ``files.info``
+# is asked this many times, this far apart, for the share that names the message.
+_SHARE_POLL_ATTEMPTS = 10
+_SHARE_POLL_SECONDS = 0.5
 
 
 class SlackAdapter(BasePlatformAdapter):
@@ -6496,13 +6500,22 @@ async def _standalone_upload_file(
 
 
 async def _standalone_message_ts(client, file_obj: Dict[str, Any], chat_id: str) -> Optional[str]:
-    """ts of the message an upload landed in: ``files.info`` shares (the upload response has none)."""
-    try:
-        info = _slack_response_payload(await client.files_info(file=file_obj.get("id")))
-    except Exception:
-        logger.warning("[Slack] files.info failed; the upload's message ts is unknown", exc_info=True)
-        return None
-    return SlackAdapter._first_file_share(info.get("file") or {}, chat_id).get("ts")
+    """ts of the message an upload landed in: ``files.info`` shares (the upload response has none),
+    waited for while Slack is still sharing the file."""
+    for attempt in range(_SHARE_POLL_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(_SHARE_POLL_SECONDS)
+        try:
+            info = _slack_response_payload(await client.files_info(file=file_obj.get("id")))
+        except Exception:
+            logger.warning("[Slack] files.info failed; the upload's message ts is unknown", exc_info=True)
+            return None
+        ts = SlackAdapter._first_file_share(info.get("file") or {}, chat_id).get("ts")
+        if ts:
+            return ts
+    logger.warning("[Slack] Slack had not shared the upload after %d checks; its message ts is unknown",
+                   _SHARE_POLL_ATTEMPTS)
+    return None
 
 
 async def _standalone_send_as_one_message(
