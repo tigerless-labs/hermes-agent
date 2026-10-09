@@ -4100,7 +4100,11 @@ class SlackAdapter(BasePlatformAdapter):
         if is_thread_reply and (
             thread_marker in self._bot_message_ts or event_thread_ts in self._bot_message_ts):
             return True
-        if thread_marker in self._mentioned_threads or event_thread_ts in self._mentioned_threads:
+        # ``extra.mentioned_thread_replies_only``: only a reply in an @-mentioned thread, not its root — the
+        # root arriving again (Slack's message_changed when a reply raises its reply count) never
+        # addressed the bot.
+        if (is_thread_reply or not self._slack_mentioned_thread_replies_only()) and (
+            thread_marker in self._mentioned_threads or event_thread_ts in self._mentioned_threads):
             return True
         if is_thread_reply and self._has_active_session_for_thread(
             channel_id=channel_id, thread_ts=event_thread_ts, user_id=user_id, team_id=team_id,
@@ -6457,6 +6461,8 @@ class SlackAdapter(BasePlatformAdapter):
     # when the *leading* token @-mentions someone else; thread_require_mention: thread replies
     # need an @-mention even in free-response channels; disable_dms: incoming DMs are ignored.
     _slack_strict_mention = _extra_or_env_flag_getter("strict_mention", "SLACK_STRICT_MENTION")
+    _slack_mentioned_thread_replies_only = _extra_or_env_flag_getter(
+        "mentioned_thread_replies_only", "SLACK_MENTIONED_THREAD_REPLIES_ONLY")
     _slack_ignore_other_user_mentions = _extra_or_env_flag_getter(
         "ignore_other_user_mentions", "SLACK_IGNORE_OTHER_USER_MENTIONS")
     _slack_thread_require_mention = _extra_or_env_flag_getter(
