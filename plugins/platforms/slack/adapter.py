@@ -6421,8 +6421,8 @@ class SlackAdapter(BasePlatformAdapter):
         self, *, channel_id: str, thread_ts: str, team_id: str, user_id: str, text: str,
         self_uids: set) -> Optional[bool]:
         """Whether anyone besides ``user_id`` and the bot spoke in or was @mentioned in the thread;
-        other bots' messages do not count. Read once from the thread's history, then kept current
-        from each admitted message; None when that history cannot be read."""
+        other bots, as authors or as mentions, do not count. Read once from the thread's history,
+        then kept current from each admitted message; None when that history cannot be read."""
         key = self._workspace_thread_key(team_id, channel_id, thread_ts)
         people = self._thread_people.get(key)
         if people is None:
@@ -6438,13 +6438,25 @@ class SlackAdapter(BasePlatformAdapter):
             for msg in history.get("messages") or []:
                 if msg.get("user") and not self._event_declares_bot_sender(msg):
                     people.add(msg["user"])
-                people |= self._addressed_people(msg.get("text") or "")
+                people |= await self._people_addressed(
+                    msg.get("text") or "", channel_id=channel_id, team_id=team_id)
             self._thread_people[key] = people
             self._evict_oldest_by_ts(self._thread_people, self._THREAD_PEOPLE_MAX, lambda k: k[2])
         if user_id:
             people.add(user_id)
-        people |= self._addressed_people(text)
+        people |= await self._people_addressed(text, channel_id=channel_id, team_id=team_id)
         return bool(people - {user_id, *self_uids})
+
+    async def _people_addressed(self, text: str, *, channel_id: str, team_id: str) -> set:
+        """``_addressed_people`` without bot accounts (an app's mention, like a "Sent using @app"
+        footer, is not another person in the thread); user groups and room-wide mentions stay."""
+        found = set()
+        for who in self._addressed_people(text):
+            if who[:1] in {"U", "W"} and await self._resolve_user_is_bot(
+                    who, chat_id=channel_id, team_id=team_id):
+                continue
+            found.add(who)
+        return found
 
     @staticmethod
     def _addressed_people(text: str) -> set:
@@ -6452,8 +6464,8 @@ class SlackAdapter(BasePlatformAdapter):
         (``<!subteam^S1>``) and the room-wide ``<!here>``, ``<!channel>``, ``<!everyone>``."""
         if not text:
             return set()
-        users = re.findall(r"<@([A-Z0-9]+)(?:\|[^>]*)?>", text)
-        groups = re.findall(r"<!subteam\^([A-Z0-9]+)(?:\|[^>]*)?>", text)
+        users = re.findall(r"<@([^>|\s]+)(?:\|[^>]*)?>", text)
+        groups = re.findall(r"<!subteam\^([^>|\s]+)(?:\|[^>]*)?>", text)
         rooms = re.findall(r"<!(everyone|channel|here)(?:\|[^>]*)?>", text, re.IGNORECASE)
         return {*users, *groups, *(f"!{room.lower()}" for room in rooms)}
 

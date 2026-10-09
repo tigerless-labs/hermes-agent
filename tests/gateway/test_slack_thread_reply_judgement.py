@@ -22,7 +22,8 @@ BOT_NAME = "tiger"
 ROOT = {"ts": THREAD, "user": SENDER, "text": f"<@{BOT_USER_ID}> pull last week's numbers"}
 BOT_REPLY = {"ts": "1700000000.000020", "user": BOT_USER_ID, "bot_id": "B_SELF", "text": "Done."}
 PEER_REPLY = {"ts": "1700000000.000030", "user": OTHER_USER_ID, "text": "I have the raw file"}
-OTHER_BOT_REPLY = {"ts": "1700000000.000040", "user": "U_BOT_OTHER", "bot_id": "B_OTHER", "text": "alert"}
+OTHER_BOT = "U_BOT_OTHER"
+OTHER_BOT_REPLY = {"ts": "1700000000.000040", "user": OTHER_BOT, "bot_id": "B_OTHER", "text": "alert"}
 
 
 def _message(text, ts, *, user=SENDER, channel=CHANNEL_ID, channel_type="channel", thread_ts=THREAD):
@@ -45,10 +46,12 @@ def _arm(adapter, *, history=None, judgement=True, replies=None):
     return adapter._app.client.conversations_replies
 
 
-async def _admit(adapter, event, *, names=None):
+async def _admit(adapter, event, *, names=None, bots=(OTHER_BOT, BOT_USER_ID)):
     names = names or {}
     resolve = AsyncMock(side_effect=lambda uid, **_kw: names.get(uid, "human"))
+    is_bot = AsyncMock(side_effect=lambda uid, **_kw: uid in bots)
     with patch.object(adapter, "_resolve_user_name", new=resolve), \
+            patch.object(adapter, "_resolve_user_is_bot", new=is_bot), \
             patch.object(adapter, "_fetch_thread_context", new=AsyncMock(return_value=None)), \
             patch.object(adapter, "_fetch_thread_parent_text", new=AsyncMock(return_value="")), \
             patch.object(adapter, "_has_active_session_for_thread", return_value=False):
@@ -60,14 +63,15 @@ async def _admit(adapter, event, *, names=None):
 @pytest.mark.parametrize("history, event, expected", [
     (_history(), _message("and the week before?", "2.1"), True),
     (_history(PEER_REPLY), _message("ok send it over", "2.2"), False),
-    (_history(), _message(f"<@{OTHER_USER_ID}> can you check?", "2.3"), False),
+    (_history(), _message(f"can you check this, <@{OTHER_USER_ID}>?", "2.3"), False),
     (_history(), _message("<!here> anyone around?", "2.4"), False),
     (_history(), _message("<!subteam^S0FINANCE|finance> numbers?", "2.5"), False),
     (_history(PEER_REPLY), _message(f"<@{BOT_USER_ID}> summarize", "2.6"), True),
     (_history(OTHER_BOT_REPLY), _message("and now?", "2.7"), True),
     ({"messages": [dict(ROOT, user=OTHER_USER_ID)]}, _message("thoughts?", "2.8"), False),
+    (_history(), _message(f"and now?\n*Sent using* <@{OTHER_BOT}|Claude>", "2.9"), True),
 ], ids=["only-sender", "peer-spoke", "peer-mentioned", "here", "user-group", "bot-mentioned",
-        "other-bot-spoke", "peer-started-thread"])
+        "other-bot-spoke", "peer-started-thread", "other-bot-mentioned"])
 async def test_a_thread_follow_up_may_go_unanswered_only_with_someone_else_there(
         adapter, history, event, expected):
     _arm(adapter, history=history)
@@ -91,6 +95,13 @@ async def test_who_is_in_the_thread_is_read_from_slack_once_then_kept_from_each_
 
 
 @pytest.mark.asyncio
+async def test_a_message_to_another_bot_may_go_unanswered_without_making_the_thread_shared(adapter):
+    _arm(adapter)
+    assert (await _admit(adapter, _message(f"<@{OTHER_BOT}> run the report", "4.4"))).reply_expected is False
+    assert (await _admit(adapter, _message("and the total?", "4.5"))).reply_expected is True
+
+
+@pytest.mark.asyncio
 async def test_redteam_an_unreadable_thread_history_means_the_message_must_be_answered(adapter):
     _arm(adapter, replies=AsyncMock(side_effect=RuntimeError("slack is down")))
     assert (await _admit(adapter, _message("status?", "5.1"))).reply_expected is True
@@ -99,7 +110,7 @@ async def test_redteam_an_unreadable_thread_history_means_the_message_must_be_an
 @pytest.mark.asyncio
 async def test_redteam_a_person_named_like_the_bot_is_still_someone_else(adapter):
     _arm(adapter)
-    event = _message(f"<@{OTHER_USER_ID}> can you take this?", "5.2")
+    event = _message(f"could you take this, <@{OTHER_USER_ID}>?", "5.2")
     admitted = await _admit(adapter, event, names={OTHER_USER_ID: BOT_NAME})
     assert admitted.reply_expected is False
 
