@@ -161,3 +161,57 @@ def test_a_file_slack_will_not_describe_is_refused(caches):
     adapter, downloads, _ = make_adapter({"files_by_id": True}, {})
     fetched = asyncio.run(adapter.fetch_conversation_file(CHANNEL, CSV["id"], TEAM))
     assert fetched.refusal == FILE_UNREADABLE and downloads == []
+
+
+def detached_world(monkeypatch, files_info: dict):
+    from types import SimpleNamespace
+
+    clients, downloads = [], []
+
+    def make_client(token):
+        client = AsyncMock()
+        client.token = token
+        client.files_info = AsyncMock(side_effect=lambda file: files_info.get(file, {"ok": False}))
+        clients.append(client)
+        return client
+
+    async def download(self, url, team_id="", *, html_label="file bytes"):
+        downloads.append((url, self.config.token))
+        return b"item,qty\napple,50\n"
+
+    monkeypatch.setattr("slack_sdk.web.async_client.AsyncWebClient", make_client)
+    monkeypatch.setattr(SlackAdapter, "_download_slack_file_bytes", download)
+    return SimpleNamespace(clients=clients, downloads=downloads)
+
+
+def test_out_of_the_gateway_a_file_shared_here_is_fetched_with_the_bot_token_and_kept_the_same_way(caches, monkeypatch):
+    from plugins.platforms.slack.adapter import standalone_fetch_conversation_file
+
+    monkeypatch.setenv("TERMINAL_DOCKER_CACHE_SCOPE", "chat")
+    world = detached_world(monkeypatch, {CSV["id"]: {"ok": True, "file": CSV}})
+    pconfig = PlatformConfig(enabled=True, token="xoxb-primary,xoxb-second", extra={"files_by_id": True})
+    fetched = asyncio.run(standalone_fetch_conversation_file(pconfig, CHANNEL, CSV["id"]))
+    assert fetched.refusal is None and [client.token for client in world.clients] == ["xoxb-primary"]
+    assert world.downloads == [(CSV["url_private_download"], "xoxb-primary")]
+    gateway, downloads, _ = make_adapter({"files_by_id": True})
+    with gateway._in_chat_caches(CHANNEL):
+        assert cache(gateway, CSV)[0] == fetched.path and downloads == []
+
+
+def test_out_of_the_gateway_a_file_shared_elsewhere_is_refused_without_downloading(caches, monkeypatch):
+    from plugins.platforms.slack.adapter import standalone_fetch_conversation_file
+
+    world = detached_world(monkeypatch, {CSV["id"]: {"ok": True, "file": {**CSV, "channels": [OTHER_CHANNEL]}}})
+    pconfig = PlatformConfig(enabled=True, token="xoxb-primary", extra={"files_by_id": True})
+    fetched = asyncio.run(standalone_fetch_conversation_file(pconfig, CHANNEL, CSV["id"]))
+    assert fetched.refusal == FILE_NOT_IN_THIS_CONVERSATION and world.downloads == []
+
+
+def test_redteam_out_of_the_gateway_without_a_bot_token_slack_is_never_asked(caches, monkeypatch):
+    from plugins.platforms.slack.adapter import standalone_fetch_conversation_file
+
+    world = detached_world(monkeypatch, {CSV["id"]: {"ok": True, "file": CSV}})
+    monkeypatch.setattr("plugins.platforms.slack.adapter.get_secret", lambda name, default="": "")
+    fetched = asyncio.run(standalone_fetch_conversation_file(PlatformConfig(enabled=True, token="", extra={}),
+                                                             CHANNEL, CSV["id"]))
+    assert fetched.refusal == FILE_UNREADABLE and world.clients == [] and world.downloads == []

@@ -12,6 +12,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import Awaitable, Callable, ClassVar, Dict, Optional, Any, Tuple, List
 
 import aiohttp
@@ -4906,6 +4907,17 @@ class SlackAdapter(BasePlatformAdapter):
         path, media_type, _ = cached
         return ConversationFile(path=path, name=name, media_type=media_type, size=int(f.get("size") or 0))
 
+    @classmethod
+    def detached(cls, config: PlatformConfig) -> "SlackAdapter":
+        """An adapter for ``config.token`` outside the gateway process (cron, tools): its Web API client
+        and file downloads, no Socket Mode connection."""
+        from slack_sdk.web.async_client import AsyncWebClient
+        adapter = cls(config)
+        client = AsyncWebClient(token=config.token)
+        _apply_slack_proxy(client, resolve_proxy_url())
+        adapter._app = SimpleNamespace(client=client)
+        return adapter
+
     async def _collect_inbound_media(
         self, event: dict, channel_id: str, team_id: str, text: str,
         thread_root_media_urls: List[str], thread_root_media_types: List[str],
@@ -6995,6 +7007,18 @@ def _standalone_format_mrkdwn(text: str) -> str:
     except Exception:
         logger.debug("Failed to apply Slack mrkdwn formatting in _standalone_send", exc_info=True)
         return text
+
+
+async def standalone_fetch_conversation_file(
+    pconfig, channel_id: str, reference: Any, team_id: str = "") -> ConversationFile:
+    """Out-of-process :meth:`SlackAdapter.fetch_conversation_file` (cron, tools): the same fetch, with the
+    primary bot token the standalone sender uses."""
+    raw_token = getattr(pconfig, "token", None) or get_secret("SLACK_BOT_TOKEN", "")
+    tokens = _load_slack_bot_tokens(str(raw_token or ""), quiet=True)
+    if not tokens:
+        return ConversationFile(path=None, refusal=FILE_UNREADABLE)
+    config = PlatformConfig(enabled=True, token=tokens[0], extra=dict(getattr(pconfig, "extra", None) or {}))
+    return await SlackAdapter.detached(config).fetch_conversation_file(channel_id, reference, team_id)
 
 
 async def _standalone_send(
