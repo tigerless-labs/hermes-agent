@@ -1134,6 +1134,10 @@ class SlackAdapter(BasePlatformAdapter):
         # Active Assistant statuses by (team_id, channel_id, thread_ts) so cleanup
         # can't clear an overlapping Slack Connect workspace; evicted oldest-thread-first.
         self._active_status_threads: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        # expected_reply_cues: threads whose Agent Sessions status is ``processing``, and the loop
+        # that set it (a pause arrives from the agent thread).
+        self._processing_session_threads: set = set()
+        self._session_status_loop: Optional[asyncio.AbstractEventLoop] = None
         # Native progress streams; each owns a lock so concurrent start/append/stop
         # can't create duplicates or append after finalization.
         self._native_task_card_streams: Dict[Tuple[str, str, str], _NativeTaskCardStream] = {}
@@ -2754,11 +2758,63 @@ class SlackAdapter(BasePlatformAdapter):
     async def _set_thread_status(
         self, chat_id: str, team_id: str, thread_ts: str, status: str, fail_label: str) -> None:
         """``assistant.threads.setStatus`` (empty ``status`` clears); failures are debug-logged."""
+        if self._slack_expected_reply_cues() and _sdk_supports_agent_sessions():
+            await self._set_session_lifecycle(
+                chat_id, team_id, thread_ts, working=bool(status), fail_label=fail_label)
+            return
         try:
             _set_status = _session_status_method(self._get_client(chat_id, team_id=team_id))
             await _set_status(channel_id=chat_id, thread_ts=thread_ts, status=status)
         except Exception as e:
             logger.debug("[Slack] assistant.threads.setStatus %s: %s", fail_label, e)
+
+    async def _set_session_lifecycle(
+        self, chat_id: str, team_id: str, thread_ts: str, *, working: bool, fail_label: str) -> None:
+        """``expected_reply_cues`` on the Agent Sessions API, which takes only lifecycle values and keeps
+        them: ``processing`` once when a thread starts working, ``active`` once when it stops. A refresh,
+        or a stop for a thread that never started, sends nothing; a failed call is retried on the next."""
+        key = self._workspace_thread_key(team_id, chat_id, str(thread_ts))
+        if key is None or working == (key in self._processing_session_threads):
+            return
+        try:
+            await self._get_client(chat_id, team_id=team_id).agents_sessions_setStatus(
+                channel_id=chat_id, thread_ts=thread_ts, status="processing" if working else "active")
+        except Exception as e:
+            logger.debug("[Slack] agents.sessions.setStatus %s: %s", fail_label, e)
+            return
+        if working:
+            self._session_status_loop = asyncio.get_running_loop()
+            self._processing_session_threads.add(key)
+            self._evict_oldest_by_ts(
+                self._processing_session_threads, self._ACTIVE_STATUS_THREADS_MAX, lambda k: k[2])
+        else:
+            self._processing_session_threads.discard(key)
+
+    async def _release_processing_threads(self, chat_id: str) -> None:
+        """Return ``chat_id``'s working threads to ``active`` (``expected_reply_cues`` pause)."""
+        for team_id, channel_id, thread_ts in tuple(self._processing_session_threads):
+            if channel_id == chat_id:
+                await self._set_session_lifecycle(
+                    channel_id, team_id, thread_ts, working=False, fail_label="pause failed")
+
+    def pause_typing_for_chat(self, chat_id: str) -> None:
+        """Pause the refresh. A lifecycle status outlives it, unlike the legacy text, so with
+        ``expected_reply_cues`` the chat's working threads also return to ``active`` until the refresh
+        resumes. GIL-safe from the agent thread: the release runs on the loop that set the status."""
+        super().pause_typing_for_chat(chat_id)
+        loop = self._session_status_loop
+        if loop is None or loop.is_closed() or not any(
+                key[1] == str(chat_id) for key in tuple(self._processing_session_threads)):
+            return
+        with contextlib.suppress(RuntimeError):
+            asyncio.run_coroutine_threadsafe(self._release_processing_threads(str(chat_id)), loop)
+
+    def _start_typing_refresh(self, event: MessageEvent, interrupt_event: asyncio.Event,
+                              metadata: Optional[dict]) -> Optional[asyncio.Task]:
+        """With ``expected_reply_cues`` a turn that may stay unanswered starts no loading status."""
+        if not self._cues_due(event, addressed=True):
+            return None
+        return super()._start_typing_refresh(event, interrupt_event, metadata)
 
     @staticmethod
     def _default_status_text(started: Optional[float]) -> str:
@@ -3248,6 +3304,11 @@ class SlackAdapter(BasePlatformAdapter):
         """Whether message reactions are enabled (scoped ``SLACK_REACTIONS`` → ``extra.reactions`` → on)."""
         configured = _extra_or_secret(self.config.extra, "reactions", "SLACK_REACTIONS", "true")
         return str(configured).lower() not in {"false", "0", "no"}
+
+    def _cues_due(self, event: MessageEvent, *, addressed: bool) -> bool:
+        """Whether a turn shows the in-progress cues: with ``expected_reply_cues`` unless it may stay
+        unanswered (``reply_expected`` False), else upstream's rule for that cue (``addressed``)."""
+        return event.reply_expected is not False if self._slack_expected_reply_cues() else addressed
 
     def _reacting_target(self, event: MessageEvent) -> Optional[Tuple[str, str, Any]]:
         """``(ts, team_id, marker)`` when reactions are on and ``event`` is being tracked."""
@@ -4671,8 +4732,8 @@ class SlackAdapter(BasePlatformAdapter):
                 thread_ts=event_thread_ts, team_id=team_id, user_id=user_id, text=routing_text,
                 bot_uid=bot_uid))
         # React only when directly addressed; MPIMs are shared, so they need a
-        # mention like any channel.
-        if (is_one_to_one_dm or is_mentioned) and self._reactions_enabled():
+        # mention like any channel. With expected_reply_cues: whenever a reply is expected.
+        if self._cues_due(msg_event, addressed=is_one_to_one_dm or is_mentioned) and self._reactions_enabled():
             self._track_reacting_message(team_id, ts)
         # App-context is per-turn UI state: in the user message, not SessionSource (would rebuild
         # the agent per view switch and leak stale context). Inert label, never a channel body.
@@ -6471,6 +6532,9 @@ class SlackAdapter(BasePlatformAdapter):
     # that does not @mention the bot may stay silent; the bot's own @mention stays visible.
     _slack_thread_reply_judgement = _extra_or_env_flag_getter(
         "thread_reply_judgement", "SLACK_THREAD_REPLY_JUDGEMENT")
+    # expected_reply_cues: the :eyes: reaction and the loading status follow ``reply_expected``.
+    _slack_expected_reply_cues = _extra_or_env_flag_getter(
+        "expected_reply_cues", "SLACK_EXPECTED_REPLY_CUES")
     _slack_disable_dms = _extra_or_env_flag_getter("disable_dms", "SLACK_DISABLE_DMS", strip=True)
 
     def _slack_message_addressed_to_other_user(self, text: str, self_uids: set) -> bool:
