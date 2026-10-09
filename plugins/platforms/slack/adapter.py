@@ -4100,7 +4100,10 @@ class SlackAdapter(BasePlatformAdapter):
         if is_thread_reply and (
             thread_marker in self._bot_message_ts or event_thread_ts in self._bot_message_ts):
             return True
-        if thread_marker in self._mentioned_threads or event_thread_ts in self._mentioned_threads:
+        # A reply in an @-mentioned thread, not its root: the root arriving again (Slack's message_changed
+        # when a reply raises its reply count) never addressed the bot.
+        if is_thread_reply and (
+            thread_marker in self._mentioned_threads or event_thread_ts in self._mentioned_threads):
             return True
         if is_thread_reply and self._has_active_session_for_thread(
             channel_id=channel_id, thread_ts=event_thread_ts, user_id=user_id, team_id=team_id,
