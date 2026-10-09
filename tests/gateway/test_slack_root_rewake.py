@@ -1,6 +1,7 @@
-"""A thread's root message that never addressed the bot starts no turn when it arrives again after the
-bot was @-mentioned in that thread (Slack sends ``message_changed`` for the root when a reply raises its
-reply count); replies in that thread still wake the bot, and so does an edit that adds a mention."""
+"""``platforms.slack.extra.mentioned_thread_replies_only``: a thread's root message that never addressed the
+bot starts no turn when it arrives again after the bot was @-mentioned in that thread (Slack sends
+``message_changed`` for the root when a reply raises its reply count); replies in that thread still wake
+the bot, and so does an edit that adds a mention. Unset keeps upstream's behaviour."""
 
 from __future__ import annotations
 
@@ -15,9 +16,8 @@ from plugins.platforms.slack.adapter import SlackAdapter
 CHANNEL, ROOT_TS, USER, BOT = "C0TEAM00001", "1791498504.084569", "U0RYAN", "U_BOT"
 
 
-@pytest.fixture
-def adapter():
-    a = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-test"))
+def make_adapter(extra: dict):
+    a = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-test", extra=extra))
     a._app = MagicMock()
     a._app.client = AsyncMock()
     a._app.client.users_info = AsyncMock(return_value={
@@ -28,6 +28,11 @@ def adapter():
     a.handle_message = AsyncMock()
     a._register_mentioned_thread(ROOT_TS)
     return a
+
+
+@pytest.fixture
+def adapter():
+    return make_adapter({"mentioned_thread_replies_only": True})
 
 
 def root(**fields) -> dict:
@@ -69,3 +74,9 @@ def test_a_new_top_level_mention_still_wakes_the_bot(adapter):
     arrive(adapter, {"user": USER, "channel": CHANNEL, "channel_type": "channel", "ts": "1791498700.000300",
                      "text": f"<@{BOT}> 帮我看看"})
     adapter.handle_message.assert_called_once()
+
+
+def test_without_the_setting_the_root_arriving_again_still_wakes_the_bot_as_upstream_does():
+    upstream = make_adapter({})
+    arrive(upstream, changed(root()))
+    upstream.handle_message.assert_called_once()
