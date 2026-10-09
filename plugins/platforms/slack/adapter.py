@@ -6,11 +6,13 @@ import functools
 import inspect
 import json
 import logging
+import contextlib
 import os
 import re
 import time
 import unicodedata
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import Awaitable, Callable, ClassVar, Dict, Optional, Any, Tuple, List
 
 import aiohttp
@@ -47,6 +49,7 @@ from gateway.platforms.base import (
     SendResult, SUPPORTED_DOCUMENT_TYPES, SUPPORTED_VIDEO_TYPES, _TEXT_INJECT_EXTENSIONS,
     is_host_excluded_by_no_proxy, resolve_proxy_url, safe_url_for_log, _ssrf_redirect_guard,
     cache_document_from_bytes_async, cache_video_from_bytes_async, _media_failure_text,
+    find_kept_cache_file, get_audio_cache_dir, get_document_cache_dir, get_image_cache_dir, get_video_cache_dir,
 )
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 
@@ -54,6 +57,12 @@ try:  # sibling module; support both package and flat plugin-dir import
     from .block_kit import render_blocks, sanitize_blocks
 except ImportError:  # pragma: no cover - plugin loaded outside package context
     from block_kit import render_blocks, sanitize_blocks  # type: ignore
+try:
+    from .files import (FILE_NOT_A_REFERENCE, FILE_NOT_IN_THIS_CONVERSATION, FILE_NOT_KEPT, FILE_UNREADABLE,
+                        ConversationFile, file_id_of, kept_key, shared_in, slack_file_id)
+except ImportError:  # pragma: no cover - plugin loaded outside package context
+    from files import (FILE_NOT_A_REFERENCE, FILE_NOT_IN_THIS_CONVERSATION, FILE_NOT_KEPT,  # type: ignore
+                       FILE_UNREADABLE, ConversationFile, file_id_of, kept_key, shared_in, slack_file_id)
 
 
 logger = logging.getLogger(__name__)
@@ -142,16 +151,19 @@ _SLACK_SPECIAL_MENTION_RE = re.compile(r"<!(?:everyone|channel|here)(?:\|[^>\n]*
 _THREAD_ROOT_IMAGE_MAX = 4
 
 
-def _slack_file_marker(file_obj: Dict[str, Any]) -> str:
+def _slack_file_marker(file_obj: Dict[str, Any], with_id: bool = False) -> str:
     """Render a compact text marker for a Slack file so text-only context shows attachments. Name is
-    sanitized (newlines/brackets stripped) so a hostile filename can't fake context structure."""
+    sanitized (newlines/brackets stripped) so a hostile filename can't fake context structure.
+    ``with_id`` adds the file's Slack id (only a well-formed one) to fetch it by."""
     name = str(file_obj.get("name") or file_obj.get("title") or file_obj.get("id") or "file")
     name = re.sub(r"[\r\n\[\]]+", " ", name).strip() or "file"
     mimetype = str(file_obj.get("mimetype") or "")
+    file_id = slack_file_id(file_obj.get("id")) if with_id else None
+    suffix = f", id {file_id}" if file_id else ""
     for kind in ("image", "video", "audio"):
         if mimetype.startswith(kind + "/"):
-            return f"[{kind}: {name}]"
-    return f"[file: {name} ({mimetype})]" if mimetype else f"[file: {name}]"
+            return f"[{kind}: {name}{suffix}]"
+    return f"[file: {name} ({mimetype}){suffix}]" if mimetype else f"[file: {name}{suffix}]"
 
 
 # GFM tables: Slack mrkdwn shows pipe tables as literal pipes, so they are wrapped in ```
@@ -4768,19 +4780,46 @@ class SlackAdapter(BasePlatformAdapter):
             return "voice clip" if _is_slack_voice_clip(f) else "video"
         return "document"
 
+    def _files_by_id(self) -> bool:
+        """``extra.files_by_id``: Slack files are kept once per chat under their Slack file id."""
+        return self.config.extra.get("files_by_id") is True
+
+    def _in_chat_caches(self, channel_id: str):
+        """With ``extra.files_by_id``, cache into *channel_id*'s own caches (the chat a file came from or
+        is fetched for) even before a session binds that chat, so a file is found there again."""
+        if not (self._files_by_id() and channel_id):
+            return contextlib.nullcontext()
+        from hermes_constants import borrowed_chat_cache_scope
+        return borrowed_chat_cache_scope("slack", channel_id)
+
+    def _kept_as(self, f: Dict[str, Any]) -> Dict[str, Any]:
+        """Writer kwargs keeping *f* under its Slack id (``{}`` when not kept by id)."""
+        key = kept_key(f) if self._files_by_id() else None
+        return {"kept": key, "stem": os.path.splitext(str(f.get("name") or ""))[0] or None} if key else {}
+
+    @staticmethod
+    def _kept_path(cache_dir, keep: Dict[str, Any]) -> Optional[str]:
+        """The copy kept under *keep*'s key in *cache_dir*, if any."""
+        return find_kept_cache_file(cache_dir(), keep["kept"]) if keep else None
+
     async def _cache_slack_file(
         self, kind: str, f: Dict[str, Any], url: str, mimetype: str, team_id: str
     ) -> Optional[Tuple[str, str, str]]:
         """Download+cache one inbound file; ``(cached_path, media_type, text_injection)``
-        or None when skipped (oversized/unknown-size document)."""
+        or None when skipped (oversized/unknown-size document). With ``extra.files_by_id`` a file
+        already kept under its Slack id is reused instead of downloaded again."""
+        keep = self._kept_as(f)
         if kind == "image":
             ext = "." + mimetype.split("/")[-1].split(";")[0]
             if ext not in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
                 ext = ".jpg"
-            return await self._download_slack_file(url, ext, team_id=team_id), mimetype, ""
+            cached = (self._kept_path(get_image_cache_dir, keep)
+                      or await self._download_slack_file(url, ext, team_id=team_id, **keep))
+            return cached, mimetype, ""
         if kind in ("audio", "voice clip"):
             ext = _resolve_slack_audio_ext(f, mimetype)
-            cached = await self._download_slack_file(url, ext, audio=True, team_id=team_id)
+            cached = (self._kept_path(get_audio_cache_dir, keep)
+                      or await self._download_slack_file(url, ext, audio=True, team_id=team_id, **keep))
             if kind == "audio":
                 return cached, mimetype, ""
             # Voice clips are audio-only MP4 Slack may label video/mp4; cache
@@ -4792,8 +4831,10 @@ class SlackAdapter(BasePlatformAdapter):
             if ext not in SUPPORTED_VIDEO_TYPES:
                 mime_to_ext = {v: k for k, v in SUPPORTED_VIDEO_TYPES.items()}
                 ext = mime_to_ext.get(mimetype.split(";", 1)[0].lower(), ".mp4")
-            raw_bytes = await self._download_slack_file_bytes(url, team_id=team_id)
-            cached_path = await cache_video_from_bytes_async(raw_bytes, ext=ext)
+            cached_path = self._kept_path(get_video_cache_dir, keep)
+            if cached_path is None:
+                raw_bytes = await self._download_slack_file_bytes(url, team_id=team_id)
+                cached_path = await cache_video_from_bytes_async(raw_bytes, ext=ext, **keep)
             logger.debug("[Slack] Cached user video: %s", cached_path)
             return cached_path, SUPPORTED_VIDEO_TYPES.get(ext, mimetype or "video/mp4"), ""
         return await self._cache_slack_document(f, url, mimetype, team_id)
@@ -4813,14 +4854,19 @@ class SlackAdapter(BasePlatformAdapter):
         if not file_size or file_size > 20 * 1024 * 1024:
             logger.warning("[Slack] Document too large or unknown size: %s", file_size)
             return None
-        raw_bytes = await self._download_slack_file_bytes(url, team_id=team_id)
-        cached_path = await cache_document_from_bytes_async(
-            raw_bytes, original_filename or f"document{ext or '.bin'}")
+        keep = self._kept_as(f)
+        _is_text = ext in _TEXT_INJECT_EXTENSIONS or (mimetype or "").startswith("text/")
+        cached_path = self._kept_path(get_document_cache_dir, keep)
+        if cached_path is None:
+            raw_bytes = await self._download_slack_file_bytes(url, team_id=team_id)
+            cached_path = await cache_document_from_bytes_async(
+                raw_bytes, original_filename or f"document{ext or '.bin'}", **({"kept": keep["kept"]} if keep else {}))
+        else:
+            raw_bytes = _Path(cached_path).read_bytes() if _is_text and os.path.getsize(cached_path) <= 100 * 1024 else b""
         doc_mime = SUPPORTED_DOCUMENT_TYPES.get(ext, mimetype or "application/octet-stream")
         logger.debug("[Slack] Cached user document: %s (%s)", cached_path, doc_mime)
         injection = ""
-        _is_text = ext in _TEXT_INJECT_EXTENSIONS or (mimetype or "").startswith("text/")
-        if _is_text and len(raw_bytes) <= 100 * 1024:
+        if _is_text and raw_bytes and len(raw_bytes) <= 100 * 1024:
             try:
                 text_content = raw_bytes.decode("utf-8")
                 display_name = original_filename or f"document{ext or '.txt'}"
@@ -4829,6 +4875,48 @@ class SlackAdapter(BasePlatformAdapter):
             except UnicodeDecodeError:
                 pass  # Binary content, skip injection
         return cached_path, doc_mime, injection
+
+    async def fetch_conversation_file(self, channel_id: str, reference: Any, team_id: str = "") -> ConversationFile:
+        """Bring a Slack file shared in *channel_id* into that chat's caches, by its id or a Slack link
+        to it: asked of Slack with the bot token (``files.info``), refused unless Slack lists the file
+        as shared in *channel_id*, then cached exactly as an arriving attachment is."""
+        file_id = file_id_of(reference)
+        if file_id is None:
+            return ConversationFile(path=None, refusal=FILE_NOT_A_REFERENCE)
+        try:
+            answer = await self._get_client(channel_id, team_id=team_id).files_info(file=file_id)
+        except Exception as exc:
+            logger.warning("[Slack] files.info failed for %s: %s", file_id, exc)
+            answer = None
+        f = answer.get("file") if answer and answer.get("ok") else None
+        if not isinstance(f, dict) or f.get("id") != file_id:
+            return ConversationFile(path=None, refusal=FILE_UNREADABLE)
+        name, mimetype = str(f.get("name") or file_id), str(f.get("mimetype") or "")
+        if not shared_in(f, channel_id):
+            return ConversationFile(path=None, name=name, refusal=FILE_NOT_IN_THIS_CONVERSATION)
+        url = f.get("url_private_download") or f.get("url_private", "")
+        cached = None
+        if url:
+            try:
+                with self._in_chat_caches(channel_id):
+                    cached = await self._cache_slack_file(self._slack_file_kind(f, mimetype), f, url, mimetype, team_id)
+            except Exception as exc:
+                logger.warning("[Slack] Fetching %s failed: %s", file_id, exc)
+        if cached is None:
+            return ConversationFile(path=None, name=name, refusal=FILE_NOT_KEPT)
+        path, media_type, _ = cached
+        return ConversationFile(path=path, name=name, media_type=media_type, size=int(f.get("size") or 0))
+
+    @classmethod
+    def detached(cls, config: PlatformConfig) -> "SlackAdapter":
+        """An adapter for ``config.token`` outside the gateway process (cron, tools): its Web API client
+        and file downloads, no Socket Mode connection."""
+        from slack_sdk.web.async_client import AsyncWebClient
+        adapter = cls(config)
+        client = AsyncWebClient(token=config.token)
+        _apply_slack_proxy(client, resolve_proxy_url())
+        adapter._app = SimpleNamespace(client=client)
+        return adapter
 
     async def _collect_inbound_media(
         self, event: dict, channel_id: str, team_id: str, text: str,
@@ -4853,7 +4941,8 @@ class SlackAdapter(BasePlatformAdapter):
                 continue
             kind = self._slack_file_kind(f, mimetype)
             try:
-                cached = await self._cache_slack_file(kind, f, url, mimetype, team_id)
+                with self._in_chat_caches(channel_id):
+                    cached = await self._cache_slack_file(kind, f, url, mimetype, team_id)
                 if cached is None:
                     continue
                 cached_path, media_type, injection = cached
@@ -5734,7 +5823,7 @@ class SlackAdapter(BasePlatformAdapter):
     # ----- Thread context fetching -----
 
     @staticmethod
-    def _render_message_text(msg: dict, bot_uid: str = "") -> str:
+    def _render_message_text(msg: dict, bot_uid: str = "", file_ids: bool = False) -> str:
         """Display text for a message: ``text`` minus bot mentions plus readable block/attachment
         text, URLs and file markers (no JSON dump, unlike ``_serialize_slack_blocks_for_agent``)."""
         msg_text = (msg.get("text") or "").strip()
@@ -5777,7 +5866,7 @@ class SlackAdapter(BasePlatformAdapter):
         # File markers: thread context is text-only, so otherwise "the chart above" refers to
         # nothing (thread-root images are delivered separately, _collect_thread_root_images).
         files = msg.get("files") if isinstance(msg.get("files"), list) else []
-        markers = [_slack_file_marker(f) for f in files if isinstance(f, dict)]
+        markers = [_slack_file_marker(f, with_id=file_ids) for f in files if isinstance(f, dict)]
         if markers:
             extras.append(" ".join(markers))
         if extras:
@@ -5895,7 +5984,7 @@ class SlackAdapter(BasePlatformAdapter):
             skip_for_delta = bool(after_ts and msg_ts and msg_ts <= after_ts)
             if skip_for_delta and not is_parent:
                 continue
-            msg_text = self._render_message_text(msg, bot_uid=bot_uid)
+            msg_text = self._render_message_text(msg, bot_uid=bot_uid, file_ids=self._files_by_id())
             if not msg_text:
                 continue
             if bot_uid:
@@ -5987,7 +6076,7 @@ class SlackAdapter(BasePlatformAdapter):
             if parent.get("ts", "") != thread_ts:
                 return ""
             bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
-            text = self._render_message_text(parent, bot_uid=bot_uid or "")
+            text = self._render_message_text(parent, bot_uid=bot_uid or "", file_ids=self._files_by_id())
             if strip_bot_mention and bot_uid:
                 text = text.replace(f"<@{bot_uid}>", "").strip()
             return text
@@ -6033,7 +6122,8 @@ class SlackAdapter(BasePlatformAdapter):
                 if not url or (kind != "image" and not file_limit):
                     continue
                 try:
-                    cached_file = await self._cache_slack_file(kind, f, url, mimetype, team_id)
+                    with self._in_chat_caches(channel_id):
+                        cached_file = await self._cache_slack_file(kind, f, url, mimetype, team_id)
                     if cached_file is None:
                         continue
                     cached_path, media_type, _ = cached_file
@@ -6335,11 +6425,11 @@ class SlackAdapter(BasePlatformAdapter):
                     raise
 
     async def _download_slack_file(
-        self, url: str, ext: str, audio: bool = False, team_id: str = "") -> str:
-        """Download a Slack image/audio file and cache it; returns the cached path."""
+        self, url: str, ext: str, audio: bool = False, team_id: str = "", **keep: Any) -> str:
+        """Download a Slack image/audio file and cache it (``keep``: kept under a key); returns the path."""
         from gateway.platforms.base import cache_audio_from_bytes_async, cache_image_from_bytes_async
         data = await self._download_slack_file_bytes(url, team_id=team_id, html_label="media")
-        return await (cache_audio_from_bytes_async if audio else cache_image_from_bytes_async)(data, ext)
+        return await (cache_audio_from_bytes_async if audio else cache_image_from_bytes_async)(data, ext, **keep)
 
     # ── Channel mention gating ─────────────────────────────────────────────
 
@@ -6917,6 +7007,18 @@ def _standalone_format_mrkdwn(text: str) -> str:
     except Exception:
         logger.debug("Failed to apply Slack mrkdwn formatting in _standalone_send", exc_info=True)
         return text
+
+
+async def standalone_fetch_conversation_file(
+    pconfig, channel_id: str, reference: Any, team_id: str = "") -> ConversationFile:
+    """Out-of-process :meth:`SlackAdapter.fetch_conversation_file` (cron, tools): the same fetch, with the
+    primary bot token the standalone sender uses."""
+    raw_token = getattr(pconfig, "token", None) or get_secret("SLACK_BOT_TOKEN", "")
+    tokens = _load_slack_bot_tokens(str(raw_token or ""), quiet=True)
+    if not tokens:
+        return ConversationFile(path=None, refusal=FILE_UNREADABLE)
+    config = PlatformConfig(enabled=True, token=tokens[0], extra=dict(getattr(pconfig, "extra", None) or {}))
+    return await SlackAdapter.detached(config).fetch_conversation_file(channel_id, reference, team_id)
 
 
 async def _standalone_send(
