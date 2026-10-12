@@ -2490,6 +2490,42 @@ class TestFormatMessage:
     def test_italic_asterisk_conversion(self, adapter):
         assert adapter.format_message("*hello*") == "_hello_"
 
+    @pytest.mark.parametrize("before,after", [
+        ("① ", "(随时)"),
+        ("这是", "内容"),
+        ("un", "able"),
+        ("(", "),"),
+        ("", "(每天两篇)"),
+    ])
+    @pytest.mark.parametrize("markdown,mrkdwn", [
+        ("**{}**", "*{}*"),
+        ("*{}*", "_{}_"),
+        ("~~{}~~", "~{}~"),
+        ("***{}***", "*_{}_*"),
+    ])
+    def test_emphasis_touching_anything_but_whitespace_gets_a_zero_width_boundary(
+        self, adapter, before, after, markdown, mrkdwn
+    ):
+        """Slack leaves a marker literal when some characters touch it from outside: a letter,
+        a CJK character, a full-width mark, and even an ASCII "(" after "*定方向*"; U+200B is a
+        boundary it accepts."""
+        span = mrkdwn.format("定方向")
+        rendered = adapter.format_message(before + markdown.format("定方向") + after)
+
+        def is_boundary(ch):
+            return ch in ("", "​") or ch.isspace()
+
+        assert rendered.replace("​", "") == before + span + after
+        start = rendered.index(span)
+        end = start + len(span)
+        assert is_boundary(rendered[start - 1:start]) and is_boundary(rendered[end:end + 1])
+
+    @pytest.mark.parametrize("markdown", [
+        "**bold** word", "a **粗体** b", "*it* and ~~gone~~", "① **定方向**\n(随时)",
+    ])
+    def test_emphasis_beside_whitespace_or_the_edge_is_left_as_is(self, adapter, markdown):
+        assert "​" not in adapter.format_message(markdown)
+
 
     def test_header_with_bold_content(self, adapter):
         # **bold** inside a header should not double-wrap
@@ -2678,7 +2714,7 @@ class TestEditMessageStreamingPipeline:
         result1 = await adapter.edit_message("C123", "ts1", "**Processing**...")
         assert result1.success is True
         kwargs1 = adapter._app.client.chat_update.call_args.kwargs
-        assert kwargs1["text"] == "*Processing*..."
+        assert kwargs1["text"] == "*Processing*​..."
 
         # Second streaming update — bold + link
         result2 = await adapter.edit_message(
