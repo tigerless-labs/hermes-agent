@@ -3240,12 +3240,21 @@ class SlackAdapter(BasePlatformAdapter):
             inner = re.sub(r"\*\*(.+?)\*\*", r"\1", m.group(1).strip())
             return _ph(f"*{inner}*")
 
+        def _flanked(m, span: str) -> str:
+            # Slack leaves an emphasis marker literal when a CJK character, a letter or some
+            # punctuation (an ASCII "(" after the closing *) touches it from outside; U+200B
+            # between them is a boundary it accepts.
+            source, start, end = m.string, m.start(), m.end()
+            lead = "\u200b" if start and not source[start - 1].isspace() else ""
+            trail = "\u200b" if end < len(source) and not source[end].isspace() else ""
+            return _ph(f"{lead}{span}{trail}")
+
         def _convert_bold(m):
             # Slack misses a closing * after a non-word char and silently truncates the
             # message; insert U+200B before it.
             inner = m.group(1)
             zw = "\u200b" if inner and not (inner[-1].isalnum() or inner[-1] == "_") else ""
-            return _ph(f"*{inner}{zw}*")
+            return _flanked(m, f"*{inner}{zw}*")
 
         # Ordered passes: protect code/links/entities/quotes, escape, then convert emphasis.
         # Escaping unescapes first in ONE regex pass (sequential replaces would decode
@@ -3258,11 +3267,11 @@ class SlackAdapter(BasePlatformAdapter):
             (r"^(>+\s)", lambda m: _ph(m.group(0)), re.MULTILINE),
             None,
             (r"^#{1,6}\s+(.+)$", _convert_header, re.MULTILINE),
-            (r"\*\*\*(.+?)\*\*\*", lambda m: _ph(f"*_{m.group(1)}_*"), 0),
+            (r"\*\*\*(.+?)\*\*\*", lambda m: _flanked(m, f"*_{m.group(1)}_*"), 0),
             (r"\*\*(.+?)\*\*", _convert_bold, 0),
             # *text* → _text_ only when non-whitespace touches both delimiters ("a * b * c" stays).
-            (r"(?<!\*)\*(\S(?:[^*\n]*?\S)?)\*(?!\*)", lambda m: _ph(f"_{m.group(1)}_"), 0),
-            (r"~~(.+?)~~", lambda m: _ph(f"~{m.group(1)}~"), 0))
+            (r"(?<!\*)\*(\S(?:[^*\n]*?\S)?)\*(?!\*)", lambda m: _flanked(m, f"_{m.group(1)}_"), 0),
+            (r"~~(.+?)~~", lambda m: _flanked(m, f"~{m.group(1)}~"), 0))
         for step in passes:
             if step is None:
                 text = _SLACK_HTML_ENTITY_RE.sub(lambda m: _SLACK_HTML_ENTITIES[m.group(1)], text)

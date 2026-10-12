@@ -2,7 +2,7 @@
   "$comment": "GENERATED — do not hand-edit. Regenerate with hermes-agent scripts/generate_conformance_vectors.py; the native renderers are the oracle (executable spec).",
   "oracle": {
     "repo": "NousResearch/hermes-agent",
-    "commit": "40eebc7d70f3d8e95c429c8aa482f31ba6c867f6",
+    "commit": "21cc29ef8fab25ca8b6bd4fb5171fc72ffc5c635",
     "generator": "scripts/generate_conformance_vectors.py",
     "generator_version": 1
   },
@@ -153,7 +153,7 @@
       "category": "grid",
       "expect": "parity",
       "input": "中文测试：**粗体** 和 `代码` 混排。",
-      "native_output": "中文测试：*粗体* 和 `代码` 混排。"
+      "native_output": "中文测试：​*粗体* 和 `代码` 混排。"
     },
     {
       "id": "bare-url",
@@ -167,7 +167,7 @@
       "category": "grid",
       "expect": "parity",
       "input": "## Report\n\nStatus: **green**. Details in `runbook.md`.\n\n- item *one*\n- item **two**\n\n```sh\nmake deploy\n```\n\nSee [dashboard](https://grafana.example.com/d/x).",
-      "native_output": "*Report*\n\nStatus: *green*. Details in `runbook.md`.\n\n- item _one_\n- item *two*\n\n```\nmake deploy\n```\n\nSee <https://grafana.example.com/d/x|dashboard>."
+      "native_output": "*Report*\n\nStatus: *green*​. Details in `runbook.md`.\n\n- item _one_\n- item *two*\n\n```\nmake deploy\n```\n\nSee <https://grafana.example.com/d/x|dashboard>."
     },
     {
       "id": "mdv2-reserved-chars",
