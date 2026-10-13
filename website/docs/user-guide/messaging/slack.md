@@ -443,6 +443,10 @@ platforms:
       # Header of the native task card (default: "Hermes is working").
       task_card_title: "Hermes is working"
 
+      # Label ending a failed task's title; the task then goes out as complete
+      # so the card carries no error mark (unset: the task goes out as error).
+      # task_card_failure_label: "fail"
+
       # Collapse approved command prompts to a single line.
       collapse_resolved_approvals: false
 
@@ -489,6 +493,7 @@ platforms:
 | `platforms.slack.extra.feedback_buttons` | `false` | When `true` with `rich_blocks`, appends Slack-native feedback controls to final replies. |
 | `platforms.slack.extra.native_task_cards` | `false` | When `true`, renders live tool calls as Slack-native plan/task cards. Cards work with Slack's built-in default `tool_progress: off`; an explicitly configured `display.tool_progress: off` (global or `display.platforms.slack`; `/verbose` writes the same key) disables cards too. Cards need a thread: when the card lane is active and the chat has no thread to anchor on (a top-level DM with `reply_in_thread: false`), Hermes shows no tool progress instead of text bubbles, unless you explicitly set `tool_progress: new`/`all`, which falls back to editable text progress there. Recoverable native API failures fall back to one continuously edited text update. |
 | `platforms.slack.extra.task_card_title` | `"Hermes is working"` | Header of the native task card and of its text fallback. |
+| `platforms.slack.extra.task_card_failure_label` | unset | When set, a failed tool's task goes out `complete` with ` - <label>` ending its title, so Slack shows no error mark on the task or the card's header. The title rather than the task's `output` carries it because Slack appends `output` on every update while each update resends the whole card. Unset keeps Slack's `error` status. |
 | `platforms.slack.extra.collapse_resolved_approvals` | `false` | When `true`, an approved command prompt is rewritten to one context line naming the decision and a truncated command. Denied and expired prompts keep their full text. |
 | `platforms.slack.extra.media_in_one_message` | `false` | When `true`, a reply and a send from outside the gateway (cron, tools) post one message carrying their text and up to 10 files: the text as the same Block Kit a reply gets, or plain when `rich_blocks` is off. What does not fit goes into that message's thread (or stays in the thread the send was made in): further files ten at a time, or all the files when the text is longer than `one_message_max_bytes`. Answers with that message's ts. |
 | `platforms.slack.extra.one_message_max_bytes` | `12000` | Longest text, in UTF-8 bytes (compact Block Kit JSON, or the plain text), that rides in the message carrying files; Slack accepts longer blocks on an upload but then never shares the files. |
