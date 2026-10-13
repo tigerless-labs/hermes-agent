@@ -321,6 +321,9 @@ def slack_deps_present() -> bool:
     return SLACK_AVAILABLE
 
 
+_TASK_CHUNK_TEXT_LIMIT = 256
+
+
 @dataclass
 class _NativeTaskCardStream:
     """Serialized state for one workspace-scoped Slack progress stream."""
@@ -2088,17 +2091,18 @@ class SlackAdapter(BasePlatformAdapter):
         extra = self.config.extra if isinstance(self.config.extra, dict) else {}
         return str(extra.get("task_card_title") or "Hermes is working")
 
-    def native_task_card_failure_output(self) -> str:
-        """Output shown on a failed task when ``extra.task_card_failure_output`` is set: the task
-        then goes out ``complete``, so Slack marks no error on the card. Unset: ``error``."""
+    def native_task_card_failure_label(self) -> str:
+        """Label ending a failed task's title when ``extra.task_card_failure_label`` is set: the
+        task then goes out ``complete``, so Slack marks no error on the card. Unset: ``error``."""
         extra = self.config.extra if isinstance(self.config.extra, dict) else {}
-        return str(extra.get("task_card_failure_output") or "")[:256]
+        return str(extra.get("task_card_failure_label") or "")
 
     def _task_card_chunk(self, task: Dict[str, str]) -> Dict[str, Any]:
         chunk = self._task_update_chunk(task)
-        failure_output = self.native_task_card_failure_output()
-        if failure_output and chunk["status"] == "error":
-            chunk.update(status="complete", output=failure_output)
+        label = self.native_task_card_failure_label()
+        if label and chunk["status"] == "error":
+            suffix = f" - {label}"[:_TASK_CHUNK_TEXT_LIMIT]
+            chunk.update(status="complete", title=chunk["title"][: _TASK_CHUNK_TEXT_LIMIT - len(suffix)] + suffix)
         return chunk
 
     def _native_task_card_key(
