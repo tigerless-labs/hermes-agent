@@ -2088,6 +2088,19 @@ class SlackAdapter(BasePlatformAdapter):
         extra = self.config.extra if isinstance(self.config.extra, dict) else {}
         return str(extra.get("task_card_title") or "Hermes is working")
 
+    def native_task_card_failure_output(self) -> str:
+        """Output shown on a failed task when ``extra.task_card_failure_output`` is set: the task
+        then goes out ``complete``, so Slack marks no error on the card. Unset: ``error``."""
+        extra = self.config.extra if isinstance(self.config.extra, dict) else {}
+        return str(extra.get("task_card_failure_output") or "")[:256]
+
+    def _task_card_chunk(self, task: Dict[str, str]) -> Dict[str, Any]:
+        chunk = self._task_update_chunk(task)
+        failure_output = self.native_task_card_failure_output()
+        if failure_output and chunk["status"] == "error":
+            chunk.update(status="complete", output=failure_output)
+        return chunk
+
     def _native_task_card_key(
         self, chat_id: str, reply_to: Optional[str], metadata: Optional[Dict[str, Any]]
     ) -> Optional[Tuple[str, str, str]]:
@@ -2129,7 +2142,7 @@ class SlackAdapter(BasePlatformAdapter):
                 if not stream.stream_ts:
                     await self._start_native_task_card_stream(client, stream, metadata)
                 chunks: List[Dict[str, Any]] = [{"type": "plan_update", "title": str(title)[:256]}]
-                chunks.extend(self._task_update_chunk(task) for task in tasks)
+                chunks.extend(self._task_card_chunk(task) for task in tasks)
                 # chunks-only: Slack rejects markdown_text alongside chunks
                 # (cannot_provide_both_markdown_text_and_chunks, #87743); the gateway owns
                 # the editable-text fallback rail that fallback_text feeds when this call fails.
