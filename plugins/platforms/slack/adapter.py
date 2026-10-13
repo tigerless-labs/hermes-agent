@@ -4742,6 +4742,11 @@ class SlackAdapter(BasePlatformAdapter):
                 judged=is_thread_reply and not is_one_to_one_dm, channel_id=channel_id,
                 thread_ts=event_thread_ts, team_id=team_id, user_id=user_id, text=routing_text,
                 bot_uid=bot_uid))
+        if self._slack_group_chat_flag():
+            msg_event.metadata["slack_group_chat"] = await self._is_group_chat(
+                is_one_to_one_dm=is_one_to_one_dm, is_dm=is_dm, channel_id=channel_id, team_id=team_id,
+                user_id=user_id, routing_text=routing_text, bot_uid=bot_uid,
+                event_thread_ts=event_thread_ts if is_thread_reply else None)
         # React only when directly addressed; MPIMs are shared, so they need a
         # mention like any channel. With expected_reply_cues: whenever a reply is expected.
         if self._cues_due(msg_event, addressed=is_one_to_one_dm or is_mentioned) and self._reactions_enabled():
@@ -6561,6 +6566,8 @@ class SlackAdapter(BasePlatformAdapter):
     # thread_context_unseen_only: a thread backfill carries only human messages its session has not seen.
     _slack_thread_context_unseen_only = _extra_or_env_flag_getter(
         "thread_context_unseen_only", "SLACK_THREAD_CONTEXT_UNSEEN_ONLY")
+    # group_chat_flag: each admitted message carries metadata["slack_group_chat"], the adapter's verdict.
+    _slack_group_chat_flag = _extra_or_env_flag_getter("group_chat_flag", "SLACK_GROUP_CHAT_FLAG")
     # expected_reply_cues: the :eyes: reaction and the loading status follow ``reply_expected``.
     _slack_expected_reply_cues = _extra_or_env_flag_getter(
         "expected_reply_cues", "SLACK_EXPECTED_REPLY_CUES")
@@ -6605,6 +6612,24 @@ class SlackAdapter(BasePlatformAdapter):
             channel_id=channel_id, thread_ts=thread_ts, team_id=team_id, user_id=user_id, text=text,
             self_uids={u for u in (bot_uid, self._bot_user_id) if u})
         return (has_others is not True) if reply_expected is None else reply_expected
+
+    async def _is_group_chat(
+            self, *, is_one_to_one_dm: bool, is_dm: bool, channel_id: str, team_id: str, user_id: str,
+            routing_text: str, bot_uid: Optional[str], event_thread_ts: Optional[str]) -> bool:
+        """``group_chat_flag``: never a 1:1 DM, always a group DM; a channel thread once someone besides
+        the sender and the bot is in it (unreadable counts as yes); a top-level message by whom it
+        @mentions."""
+        if is_one_to_one_dm:
+            return False
+        if is_dm:
+            return True
+        self_uids = {u for u in (bot_uid, self._bot_user_id) if u}
+        if event_thread_ts:
+            return await self._thread_has_others(
+                channel_id=channel_id, thread_ts=event_thread_ts, team_id=team_id, user_id=user_id,
+                text=routing_text, self_uids=self_uids) is not False
+        addressed = await self._people_addressed(routing_text, channel_id=channel_id, team_id=team_id)
+        return bool(addressed - {user_id, *self_uids})
 
     async def _thread_has_others(
         self, *, channel_id: str, thread_ts: str, team_id: str, user_id: str, text: str,
