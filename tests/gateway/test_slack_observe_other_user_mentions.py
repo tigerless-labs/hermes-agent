@@ -217,7 +217,107 @@ async def test_the_person_addressed_joins_the_thread_for_reply_judgement(adapter
     assert (await _dispatched(adapter, _message("and the week before?", "5.1"))).reply_expected is True
     _arm(adapter)
     await _admit(adapter, _message(f"<@{OTHER_USER_ID}> check this", "5.2"))
-    assert (await _dispatched(adapter, _message("and now?", "5.3"))).reply_expected is False
+    await _dispatched(adapter, _message(f"<@{BOT_USER_ID}> summarize", "5.3"))
+    assert (await _dispatched(adapter, _message("and now?", "5.4"))).reply_expected is False
+
+
+async def _sequence(adapter, messages):
+    """Which of ``messages`` started a turn, in order."""
+    dispatched = []
+    for event in messages:
+        adapter.handle_message.reset_mock()
+        await _admit(adapter, event)
+        dispatched.append(adapter.handle_message.await_count == 1)
+    return dispatched
+
+
+@pytest.mark.asyncio
+async def test_after_an_opening_mention_of_someone_else_the_thread_is_silent_until_the_bot_is_named(
+        adapter, store):
+    session_id = await _open_session(adapter, store)
+    before = len(_rows(store, session_id))
+    _arm(adapter)
+    dispatched = await _sequence(adapter, [
+        _message(f"<@{OTHER_USER_ID}> check the declaration", "7.1"),
+        _message("ok, looking now", "7.2", user=OTHER_USER_ID),
+        _message("and the totals too", "7.3"),
+        _message(f"<@{BOT_USER_ID}> what did we just agree?", "7.4"),
+        _message("and the week before?", "7.5"),
+    ])
+    assert dispatched == [False, False, False, True, True]
+    recorded = "\n\n".join(row["content"] for row in _rows(store, session_id)[before:])
+    positions = [recorded.find(said) for said in ("check the declaration", "ok, looking now", "and the totals too")]
+    assert -1 not in positions and positions == sorted(positions)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opening, silenced", [
+    (f"<@{OTHER_USER_ID}> and <@{BOT_USER_ID}> compare these", False),
+    (f"<@{OTHER_USER_ID}|bella> and <@{BOT_USER_ID}|tiger> compare these", False),
+    (f"ask <@{OTHER_USER_ID}> for the file", False),
+    (f"<@{OTHER_USER_ID}> check this", True),
+], ids=["bot-also-named", "pipe-forms", "other-mid-sentence", "other-opening"])
+async def test_only_an_opening_mention_of_someone_else_without_the_bot_silences(
+        adapter, store, opening, silenced):
+    await _open_session(adapter, store)
+    _arm(adapter)
+    dispatched = await _sequence(adapter, [_message(opening, "8.1"), _message("and now?", "8.2")])
+    assert dispatched[1] is not silenced
+
+
+@pytest.mark.asyncio
+async def test_commands_pass_through_the_silence(adapter, store):
+    await _open_session(adapter, store)
+    _arm(adapter)
+    dispatched = await _sequence(adapter, [
+        _message(f"<@{OTHER_USER_ID}> check this", "9.1"), _message("!stop", "9.2")])
+    assert dispatched == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_silence_belongs_to_one_thread(adapter, store):
+    other_thread = "1700000000.000050"
+    adapter._mentioned_threads.add(other_thread)
+    await _open_session(adapter, store)
+    _arm(adapter)
+    dispatched = await _sequence(adapter, [
+        _message(f"<@{OTHER_USER_ID}> check this", "10.1"),
+        _message("and now?", "10.2", thread_ts=other_thread),
+    ])
+    assert dispatched == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_switch_off_ignores_only_the_opening_message(adapter, store):
+    await _open_session(adapter, store)
+    _arm(adapter, observe=False)
+    dispatched = await _sequence(adapter, [
+        _message(f"<@{OTHER_USER_ID}> check this", "11.1"), _message("and now?", "11.2")])
+    assert dispatched == [False, True]
+
+
+HUMAN_NAMES_BOT = {"ts": "1.1", "user": SENDER, "text": f"<@{BOT_USER_ID}> pull the numbers"}
+HUMAN_NAMES_OTHER = {"ts": "1.2", "user": SENDER, "text": f"<@{OTHER_USER_ID}> check this"}
+HUMAN_CHATS = {"ts": "1.3", "user": OTHER_USER_ID, "text": "on it"}
+BOT_NAMES_OTHER = {"ts": "1.4", "user": BOT_USER_ID, "bot_id": "B_SELF", "text": f"<@{OTHER_USER_ID}> sent"}
+OTHER_BOT_NAMES_OTHER = {"ts": "1.5", "user": "U_BOT_OTHER", "bot_id": "B_OTHER", "text": f"<@{OTHER_USER_ID}> alert"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replies, silenced", [
+    (AsyncMock(return_value={"messages": [HUMAN_NAMES_BOT, HUMAN_NAMES_OTHER, HUMAN_CHATS]}), True),
+    (AsyncMock(return_value={"messages": [HUMAN_NAMES_OTHER, HUMAN_NAMES_BOT, HUMAN_CHATS]}), False),
+    (AsyncMock(return_value={"messages": [HUMAN_NAMES_BOT, BOT_NAMES_OTHER, OTHER_BOT_NAMES_OTHER]}), False),
+    (AsyncMock(side_effect=RuntimeError("slack down")), False),
+    (AsyncMock(return_value=None), False),
+], ids=["other-named-last", "bot-named-last", "bots-do-not-count", "history-error", "history-missing"])
+async def test_after_a_restart_silence_is_rebuilt_from_the_thread_and_unknown_means_present(
+        adapter, store, replies, silenced):
+    await _open_session(adapter, store)
+    adapter._thread_silenced.clear()
+    adapter._app.client.conversations_replies = replies
+    _arm(adapter)
+    assert await _sequence(adapter, [_message("and now?", "12.1")]) == [not silenced]
 
 
 @pytest.mark.asyncio

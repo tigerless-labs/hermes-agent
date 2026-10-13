@@ -1061,6 +1061,7 @@ class SlackAdapter(BasePlatformAdapter):
     _THREAD_CACHE_TTL = 60.0
     _THREAD_PEOPLE_MAX = 2000
     _THREAD_PEOPLE_SEED_LIMIT = 200
+    _THREAD_SILENCED_MAX = 2000
     _OBSERVE_IDLE_POLL_S = 1.0
     _OBSERVE_IDLE_MAX_WAIT_S = 3600.0
     # Watchdog: poll interval; reconnect after N ping_intervals of silence (Slack pings idle
@@ -1134,6 +1135,9 @@ class SlackAdapter(BasePlatformAdapter):
         # (team_id, channel_id, thread_ts) → Slack ids that spoke in or were @mentioned in the thread
         # (``thread_reply_judgement``); seeded once from its history, then kept from each message.
         self._thread_people: Dict[Tuple[str, str, str], set] = {}
+        # (team_id, channel_id, thread_ts) → whether the latest human message that named someone opened
+        # with another person's @mention (``observe_other_user_mentions``); seeded from history.
+        self._thread_silenced: Dict[Tuple[str, str, str], bool] = {}
         # Threads already rehydration-checked this process (first reply after a restart injects
         # missed messages exactly once); message IDs with reaction lifecycle (bounded: an exception
         # between add and finalize would leak entries).
@@ -4713,7 +4717,8 @@ class SlackAdapter(BasePlatformAdapter):
         if not is_one_to_one_dm and bot_uid and self._observes_other_user_mention(
                 channel_id=channel_id, routing_text=routing_text, bot_uid=bot_uid,
                 is_mentioned=is_mentioned):
-            await self._observe_other_user_mention(
+            self._set_thread_silenced(team_id, channel_id, event_thread_ts or ts, True)
+            await self._observe_message(
                 event, text=text, original_text=original_text, channel_id=channel_id,
                 team_id=team_id, ts=ts, user_id=user_id, thread_ts=thread_ts, is_dm=is_dm,
                 event_thread_ts=event_thread_ts if is_thread_reply else None,
@@ -4725,6 +4730,15 @@ class SlackAdapter(BasePlatformAdapter):
             is_mentioned=is_mentioned, is_thread_reply=is_thread_reply,
             event_thread_ts=event_thread_ts, user_id=user_id, team_id=team_id, is_dm=is_dm,
             force_process=force_process)):
+            return
+        if not is_one_to_one_dm and bot_uid and await self._stays_silent_in_thread(
+                channel_id=channel_id, team_id=team_id, routing_text=routing_text, bot_uid=bot_uid,
+                is_mentioned=is_mentioned, event_thread_ts=event_thread_ts if is_thread_reply else None,
+                passes_silence=is_command_text or force_process):
+            await self._observe_message(
+                event, text=text, original_text=original_text, channel_id=channel_id,
+                team_id=team_id, ts=ts, user_id=user_id, thread_ts=thread_ts, is_dm=is_dm,
+                event_thread_ts=event_thread_ts, routing_text=routing_text, bot_uid=bot_uid)
             return
         # Claim the message ts HERE: a link unfurl emits `message_changed` with a different event
         # ts, so only the `_processed_message_ts` guard stops a duplicate turn, and it must be set
@@ -6589,24 +6603,81 @@ class SlackAdapter(BasePlatformAdapter):
             not is_mentioned and not self._slack_message_mentions_self(routing_text, self_uids)
             and self._slack_message_addressed_to_other_user(routing_text, self_uids))
 
-    async def _observe_other_user_mention(
+    async def _stays_silent_in_thread(
+            self, *, channel_id: str, team_id: str, routing_text: str, bot_uid: str,
+            is_mentioned: bool, event_thread_ts: Optional[str], passes_silence: bool) -> bool:
+        """``observe_other_user_mentions``: an admitted thread reply that does not name the bot, in a
+        thread silenced by an opening @mention of someone else. Naming the bot ends the silence;
+        commands and internal triggers pass through it."""
+        if not (event_thread_ts and self._slack_observe_other_user_mentions()
+                and self._slack_ignore_other_user_mentions()):
+            return False
+        self_uids = {u for u in (bot_uid, self._bot_user_id) if u}
+        if is_mentioned or self._slack_message_mentions_self(routing_text, self_uids):
+            self._set_thread_silenced(team_id, channel_id, event_thread_ts, False)
+            return False
+        if passes_silence:
+            return False
+        return await self._thread_is_silenced(
+            channel_id=channel_id, thread_ts=event_thread_ts, team_id=team_id, self_uids=self_uids)
+
+    async def _thread_is_silenced(
+            self, *, channel_id: str, thread_ts: str, team_id: str, self_uids: set) -> bool:
+        """Whether the latest human message in the thread that named someone opened with another
+        person's @mention and named no bot. Kept from each message, seeded once from the thread's
+        history; an unreadable history leaves the bot present and is retried next time."""
+        key = self._workspace_thread_key(team_id, channel_id, thread_ts)
+        if key in self._thread_silenced:
+            return self._thread_silenced[key]
+        try:
+            history = await self._conversations_replies_with_backoff(
+                channel_id, thread_ts, self._THREAD_PEOPLE_SEED_LIMIT, team_id)
+        except Exception:
+            logger.debug("[Slack] thread history for silence unavailable", exc_info=True)
+            return False
+        if history is None:
+            return False
+        silenced = False
+        for msg in history.get("messages") or []:
+            if msg.get("user") in self_uids or self._event_declares_bot_sender(msg):
+                continue
+            text = _slack_mention_detection_text(msg) or msg.get("text") or ""
+            if (self._slack_message_mentions_self(text, self_uids)
+                    or self._slack_message_matches_mention_patterns(text)):
+                silenced = False
+            elif self._slack_message_addressed_to_other_user(text, self_uids):
+                silenced = True
+        self._set_thread_silenced(team_id, channel_id, thread_ts, silenced)
+        return silenced
+
+    def _set_thread_silenced(self, team_id: str, channel_id: str, thread_ts: str, silenced: bool) -> None:
+        key = self._workspace_thread_key(team_id, channel_id, thread_ts)
+        if key is None:
+            return
+        self._thread_silenced[key] = silenced
+        self._evict_oldest_by_ts(self._thread_silenced, self._THREAD_SILENCED_MAX, lambda k: k[2])
+
+    async def _observe_message(
             self, event: dict, *, text: str, original_text: str, channel_id: str, team_id: str,
             ts: str, user_id: str, thread_ts: Optional[str], is_dm: bool,
             event_thread_ts: Optional[str], routing_text: str, bot_uid: str) -> None:
         """Start no turn; append the message to the conversation's existing session (never a new
         one) as the user text a dispatched turn records, once no turn of that session is running.
-        In a thread under ``thread_reply_judgement`` the person addressed joins its people."""
+        In a thread under ``thread_reply_judgement`` the people it addresses join the thread's."""
         store = getattr(self, "_session_store", None)
         if store is None:
+            return
+        store_key = store._generate_session_key(self.build_source(
+            chat_id=channel_id, chat_name="", chat_type="dm" if is_dm else "group", user_id=user_id,
+            user_name="", thread_id=thread_ts, scope_id=str(team_id) if team_id else None,
+            message_id=ts))
+        if not store.peek_session_id(store_key):
             return
         msg_event = await self._build_message_event(
             event, text=text, original_text=original_text, command_probe_text=original_text,
             is_command_text=False, channel_id=channel_id, team_id=team_id, ts=ts, user_id=user_id,
             thread_ts=thread_ts, is_dm=is_dm, media_urls=[], media_types=[], media_text_inlined=[],
             channel_context=None, reply_expected=False)
-        store_key = store._generate_session_key(msg_event.source)
-        if not store.peek_session_id(store_key):
-            return
         if event_thread_ts and self._slack_thread_reply_judgement():
             await self._thread_has_others(
                 channel_id=channel_id, thread_ts=event_thread_ts, team_id=team_id, user_id=user_id,
