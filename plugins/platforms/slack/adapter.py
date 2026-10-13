@@ -384,6 +384,14 @@ def _collect_slack_block_mentions(blocks: list) -> list:
     return mentions
 
 
+def _slack_ts_epoch(ts: str) -> float:
+    """A Slack message ``ts`` as epoch seconds; now when it is not one."""
+    try:
+        return float(ts)
+    except (TypeError, ValueError):
+        return time.time()
+
+
 def _slack_mention_detection_text(event: dict) -> str:
     """Text for @mention detection: flat ``text`` plus non-quoted Block-Kit-only mentions.
 
@@ -1053,6 +1061,8 @@ class SlackAdapter(BasePlatformAdapter):
     _THREAD_CACHE_TTL = 60.0
     _THREAD_PEOPLE_MAX = 2000
     _THREAD_PEOPLE_SEED_LIMIT = 200
+    _OBSERVE_IDLE_POLL_S = 1.0
+    _OBSERVE_IDLE_MAX_WAIT_S = 3600.0
     # Watchdog: poll interval; reconnect after N ping_intervals of silence (Slack pings idle
     # sockets, so silence = wedged transport); grace after (re)connect for the first ping/pong.
     _socket_watchdog_interval_s = 15.0
@@ -4700,6 +4710,15 @@ class SlackAdapter(BasePlatformAdapter):
         force_process = bool(event.get("_hermes_force_process"))
         if await self._peer_bot_drop(event, user_id, bot_uid, channel_id, team_id, is_mentioned):
             return
+        if not is_one_to_one_dm and bot_uid and self._observes_other_user_mention(
+                channel_id=channel_id, routing_text=routing_text, bot_uid=bot_uid,
+                is_mentioned=is_mentioned):
+            await self._observe_other_user_mention(
+                event, text=text, original_text=original_text, channel_id=channel_id,
+                team_id=team_id, ts=ts, user_id=user_id, thread_ts=thread_ts, is_dm=is_dm,
+                event_thread_ts=event_thread_ts if is_thread_reply else None,
+                routing_text=routing_text, bot_uid=bot_uid)
+            return
         if (
             not is_one_to_one_dm and bot_uid and not await self._channel_gate_allows(
             channel_id=channel_id, routing_text=routing_text, bot_uid=bot_uid,
@@ -6541,6 +6560,10 @@ class SlackAdapter(BasePlatformAdapter):
     # that does not @mention the bot may stay silent; the bot's own @mention stays visible.
     _slack_thread_reply_judgement = _extra_or_env_flag_getter(
         "thread_reply_judgement", "SLACK_THREAD_REPLY_JUDGEMENT")
+    # observe_other_user_mentions: what ignore_other_user_mentions drops joins the conversation's
+    # existing session as an observed row, after any running turn of that session.
+    _slack_observe_other_user_mentions = _extra_or_env_flag_getter(
+        "observe_other_user_mentions", "SLACK_OBSERVE_OTHER_USER_MENTIONS")
     # expected_reply_cues: the :eyes: reaction and the loading status follow ``reply_expected``.
     _slack_expected_reply_cues = _extra_or_env_flag_getter(
         "expected_reply_cues", "SLACK_EXPECTED_REPLY_CUES")
@@ -6551,6 +6574,82 @@ class SlackAdapter(BasePlatformAdapter):
         of someone other than the bot; ``<!here>``/``<#C…>`` address the room, not a person."""
         match = text and re.match(r"\s*<@([^>|\s]+)(?:\|[^>]*)?>", text)
         return bool(match) and match.group(1) not in self_uids
+
+    def _observes_other_user_mention(
+            self, *, channel_id: str, routing_text: str, bot_uid: str, is_mentioned: bool) -> bool:
+        """``observe_other_user_mentions``: a message the ``ignore_other_user_mentions`` gate drops
+        in an allowed channel (it opens by @mentioning someone else and never mentions the bot)."""
+        if not (self._slack_observe_other_user_mentions() and self._slack_ignore_other_user_mentions()):
+            return False
+        allowed_channels = self._slack_allowed_channels()
+        if allowed_channels and channel_id not in allowed_channels:
+            return False
+        self_uids = {u for u in (bot_uid, self._bot_user_id) if u}
+        return (
+            not is_mentioned and not self._slack_message_mentions_self(routing_text, self_uids)
+            and self._slack_message_addressed_to_other_user(routing_text, self_uids))
+
+    async def _observe_other_user_mention(
+            self, event: dict, *, text: str, original_text: str, channel_id: str, team_id: str,
+            ts: str, user_id: str, thread_ts: Optional[str], is_dm: bool,
+            event_thread_ts: Optional[str], routing_text: str, bot_uid: str) -> None:
+        """Start no turn; append the message to the conversation's existing session (never a new
+        one) as the user text a dispatched turn records, once no turn of that session is running.
+        In a thread under ``thread_reply_judgement`` the person addressed joins its people."""
+        store = getattr(self, "_session_store", None)
+        if store is None:
+            return
+        msg_event = await self._build_message_event(
+            event, text=text, original_text=original_text, command_probe_text=original_text,
+            is_command_text=False, channel_id=channel_id, team_id=team_id, ts=ts, user_id=user_id,
+            thread_ts=thread_ts, is_dm=is_dm, media_urls=[], media_types=[], media_text_inlined=[],
+            channel_context=None, reply_expected=False)
+        store_key = store._generate_session_key(msg_event.source)
+        if not store.peek_session_id(store_key):
+            return
+        if event_thread_ts and self._slack_thread_reply_judgement():
+            await self._thread_has_others(
+                channel_id=channel_id, thread_ts=event_thread_ts, team_id=team_id, user_id=user_id,
+                text=routing_text, self_uids={u for u in (bot_uid, self._bot_user_id) if u})
+        entry = {
+            "role": "user", "content": self._observed_turn_text(msg_event),
+            "timestamp": _slack_ts_epoch(ts), "observed": True}
+        if ts:
+            entry["message_id"] = ts
+        task = asyncio.create_task(self._append_observed_when_idle(
+            store, store_key, self._event_session_key(msg_event), entry))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    def _observed_turn_text(self, msg_event: MessageEvent) -> str:
+        """The user text the runner records for ``msg_event`` (sender attribution included),
+        under the adapter's own session-sharing settings."""
+        from gateway.run_inbound import GatewayInboundMixin
+        extra = self.config.extra
+        settings = SimpleNamespace(config=SimpleNamespace(
+            group_sessions_per_user=extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=extra.get("thread_sessions_per_user", False)))
+        return GatewayInboundMixin._prefix_inbound_sender_context(
+            settings, msg_event, msg_event.source, msg_event.text or "")
+
+    async def _append_observed_when_idle(
+            self, store: Any, store_key: str, guard_key: str, entry: dict) -> None:
+        """Append once ``guard_key`` has no running turn: a row written mid-turn would separate a
+        tool call from its result. Dropped when the turn outlasts the wait or the session is gone."""
+        waited = 0.0
+        while guard_key in self._active_sessions:
+            if waited >= self._OBSERVE_IDLE_MAX_WAIT_S:
+                logger.warning("[Slack] Observed message dropped: session %s stayed busy", guard_key)
+                return
+            await asyncio.sleep(self._OBSERVE_IDLE_POLL_S)
+            waited += self._OBSERVE_IDLE_POLL_S
+        session_id = store.peek_session_id(store_key)
+        if not session_id:
+            return
+        try:
+            store.append_to_transcript(session_id, entry)
+        except Exception:
+            logger.warning("[Slack] Failed to record observed message in %s", guard_key, exc_info=True)
 
     def _slack_is_free_channel(self, channel_id: str) -> bool:
         """Does ``channel_id`` admit messages without an @mention?"""
