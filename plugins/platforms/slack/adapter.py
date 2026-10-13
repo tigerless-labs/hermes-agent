@@ -4541,6 +4541,8 @@ class SlackAdapter(BasePlatformAdapter):
 
         async def _fetch(**kw) -> None:
             nonlocal channel_context
+            if has_active_thread_session and self._slack_thread_context_unseen_only():
+                kw.update(after_ts=kw.get("after_ts") or event_thread_ts, without_own=True)
             thread_context = await self._fetch_thread_context(
                 channel_id=channel_id, thread_ts=event_thread_ts, current_ts=ts, team_id=team_id,
                 **kw)
@@ -6086,7 +6088,7 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def _fetch_thread_context(
         self, channel_id: str, thread_ts: str, current_ts: str, team_id: str = "", limit: int = 30,
-        after_ts: str = "", force_refresh: bool = False) -> str:
+        after_ts: str = "", force_refresh: bool = False, without_own: bool = False) -> str:
         """Prior thread messages as formatted context ("" on failure/empty). Cold-start only
         (session history holds them afterwards); ``after_ts`` = session watermark returns only
         unseen messages; ``force_refresh`` bypasses the _THREAD_CACHE_TTL cache (Tier 3 API).
@@ -6100,7 +6102,10 @@ class SlackAdapter(BasePlatformAdapter):
         _fmt = functools.partial(
             self._format_thread_context, thread_ts=thread_ts, current_ts=current_ts,
             team_id=team_id, channel_id=channel_id)
+        unseen_only = self._slack_thread_context_unseen_only()
         if cached and (now - cached.fetched_at) < self._THREAD_CACHE_TTL:
+            if unseen_only and cached.messages:
+                return (await _fmt(cached.messages, after_ts=after_ts, without_own=without_own))[0]
             if not after_ts:
                 return cached.content
             if cached.messages:
@@ -6134,6 +6139,8 @@ class SlackAdapter(BasePlatformAdapter):
                     if now - v.fetched_at >= self._THREAD_CACHE_TTL]
                 for k in stale_keys:
                     del self._thread_context_cache[k]
+            if unseen_only and without_own:
+                return (await _fmt(messages, after_ts=after_ts, without_own=True))[0]
             if after_ts:
                 return (await _fmt(messages, after_ts=after_ts))[0]
             return content
@@ -6174,7 +6181,7 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def _format_thread_context(
         self, messages: list[dict[str, Any]], *, thread_ts: str, current_ts: str, team_id: str,
-        channel_id: str, after_ts: str = "") -> tuple[str, str]:
+        channel_id: str, after_ts: str = "", without_own: bool = False) -> tuple[str, str]:
         """Format Slack replies into an injected thread-context block.
         With ``after_ts``, only messages strictly newer than the watermark are included (delta
         refresh); parent text is still captured. Returns ``(content, parent_text)``.
@@ -6193,6 +6200,8 @@ class SlackAdapter(BasePlatformAdapter):
             # Skip already-consumed messages; parent still flows through for parent_text capture.
             skip_for_delta = bool(after_ts and msg_ts and msg_ts <= after_ts)
             if skip_for_delta and not is_parent:
+                continue
+            if without_own and not is_parent and self._is_own_bot_message(msg, team_id):
                 continue
             msg_text = self._render_message_text(msg, bot_uid=bot_uid, file_ids=self._files_by_id())
             if not msg_text:
@@ -6221,6 +6230,12 @@ class SlackAdapter(BasePlatformAdapter):
                     "(not yet in conversation history):]")
             content = header + "\n" + "\n".join(context_parts) + "\n[End of thread context]\n\n"
         return content, parent_text
+
+    def _is_own_bot_message(self, msg: dict, team_id: str) -> bool:
+        """Posted by this bot's own account (Slack user id and bot flag, never a display name)."""
+        msg_team = msg.get("team") or team_id
+        self_bot_uid = (self._team_bot_user_ids.get(msg_team) if msg_team else None) or self._bot_user_id
+        return bool(self_bot_uid and self._event_declares_bot_sender(msg) and msg.get("user") == self_bot_uid)
 
     async def _thread_context_line(
         self, msg: dict, msg_text: str, is_parent: bool, team_id: str, channel_id: str) -> str:
@@ -6553,6 +6568,8 @@ class SlackAdapter(BasePlatformAdapter):
                 return False
             session_store._ensure_loaded()
             entry = session_store._entries.get(session_key)
+            if entry is None and self._slack_thread_context_unseen_only():
+                return session_store.resolve_session_id_for_key(session_key) is not None
             if entry is None:
                 return False
             # Explicit suspension starts a fresh conversation on the next turn and
@@ -6699,6 +6716,9 @@ class SlackAdapter(BasePlatformAdapter):
     # that does not @mention the bot may stay silent; the bot's own @mention stays visible.
     _slack_thread_reply_judgement = _extra_or_env_flag_getter(
         "thread_reply_judgement", "SLACK_THREAD_REPLY_JUDGEMENT")
+    # thread_context_unseen_only: a thread backfill carries only human messages its session has not seen.
+    _slack_thread_context_unseen_only = _extra_or_env_flag_getter(
+        "thread_context_unseen_only", "SLACK_THREAD_CONTEXT_UNSEEN_ONLY")
     # expected_reply_cues: the :eyes: reaction and the loading status follow ``reply_expected``.
     _slack_expected_reply_cues = _extra_or_env_flag_getter(
         "expected_reply_cues", "SLACK_EXPECTED_REPLY_CUES")
