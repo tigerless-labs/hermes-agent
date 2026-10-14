@@ -5566,6 +5566,16 @@ class SlackAdapter(BasePlatformAdapter):
             )
             return
 
+    @staticmethod
+    def _clarify_choice_section(number: str, choice: str) -> dict:
+        """``extra.clarify_choices_in_text``: a choice's full text under its number, which is all
+        its button shows — Slack renders a button on one line and cuts a long label off."""
+        text = choice.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        line = f"*{number}.* {text}"
+        if len(line) > 3000:
+            line = line[: 3000 - len("...")] + "..."
+        return {"type": "section", "text": {"type": "mrkdwn", "text": line}}
+
     async def send_clarify(
         self, chat_id: str, question: str, choices: Optional[list], clarify_id: str,
         session_key: str, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
@@ -5587,9 +5597,14 @@ class SlackAdapter(BasePlatformAdapter):
                 body = body[:budget] + "..."
             # Slack caps an actions block at 5 elements; clarify caps choices at 4 (+ Other) but
             # chunk anyway so larger lists degrade gracefully instead of 400ing.
+            listed = self._extra_flag("clarify_choices_in_text")
+            choice_sections = []
             elements = []
             for idx, choice in enumerate(choices):
                 label = str(choice).strip() or f"Option {idx + 1}"
+                if listed:
+                    choice_sections.append(self._clarify_choice_section(str(idx + 1), label))
+                    label = str(idx + 1)
                 elements.append(
                     self._button(
                         label[:75], f"hermes_clarify_choice_{idx}",
@@ -5597,7 +5612,7 @@ class SlackAdapter(BasePlatformAdapter):
             elements.append(
                 self._button("✏️ Other…", "hermes_clarify_other", f"{clarify_id}|other", emoji=True)
             )
-            blocks: list = [{"type": "section", "text": {"type": "mrkdwn", "text": body}}]
+            blocks: list = [{"type": "section", "text": {"type": "mrkdwn", "text": body}}, *choice_sections]
             for start in range(0, len(elements), 5):
                 blocks.append({"type": "actions", "elements": elements[start : start + 5]})
             return body, blocks

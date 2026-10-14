@@ -450,6 +450,9 @@ platforms:
       # Collapse approved command prompts to a single line.
       collapse_resolved_approvals: false
 
+      # Clarify choices in full, numbered, in the message; buttons show the numbers.
+      clarify_choices_in_text: false
+
       # A reply's (or a cron/tool send's) text and every file as one message.
       media_in_one_message: false
       # Name in the chat a MEDIA file a reply asked for but delivery refused.
@@ -495,6 +498,7 @@ platforms:
 | `platforms.slack.extra.task_card_title` | `"Hermes is working"` | Header of the native task card and of its text fallback. |
 | `platforms.slack.extra.task_card_failure_label` | unset | When set, a failed tool's task goes out `complete` with ` - <label>` ending its title, so Slack shows no error mark on the task or the card's header. The title rather than the task's `output` carries it because Slack appends `output` on every update while each update resends the whole card. Unset keeps Slack's `error` status. |
 | `platforms.slack.extra.collapse_resolved_approvals` | `false` | When `true`, an approved command prompt is rewritten to one context line naming the decision and a truncated command. Denied and expired prompts keep their full text. |
+| `platforms.slack.extra.clarify_choices_in_text` | `false` | When `true`, a clarify prompt lists each choice's full text under its number and each choice button shows only that number. Slack renders a button on one line and cuts a long label off, so a long choice is otherwise unreadable. A resolved or retired card keeps the question and the chosen text. |
 | `platforms.slack.extra.media_in_one_message` | `false` | When `true`, a reply and a send from outside the gateway (cron, tools) post one message carrying their text and up to 10 files: the text as the same Block Kit a reply gets, or plain when `rich_blocks` is off. What does not fit goes into that message's thread (or stays in the thread the send was made in): further files ten at a time, or all the files when the text is longer than `one_message_max_bytes`. Answers with that message's ts. |
 | `platforms.slack.extra.one_message_max_bytes` | `12000` | Longest text, in UTF-8 bytes (compact Block Kit JSON, or the plain text), that rides in the message carrying files; Slack accepts longer blocks on an upload but then never shares the files. |
 | `platforms.slack.extra.report_dropped_media` | `false` | When `true`, a `MEDIA:` file a reply asked for but delivery refused (missing, denied) is named in the chat with the usual "couldn't deliver" notice. |
