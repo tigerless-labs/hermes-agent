@@ -6,6 +6,7 @@ import functools
 import inspect
 import json
 import logging
+import mimetypes
 import contextlib
 import os
 import re
@@ -2373,6 +2374,7 @@ class SlackAdapter(BasePlatformAdapter):
             sent = await _upload_as_one_message(self._client_for(chat_id, metadata), chat_id, files, thread_ts, **rides)
         if sent is not None:
             await self._notify_unsent(chat_id, sent["unsent"], thread_ts, metadata)
+            self._remember_sent_files(chat_id, thread_ts, sent.get("files") or [])
             message_id = sent["message_id"]
         else:
             message_id = None
@@ -2393,7 +2395,33 @@ class SlackAdapter(BasePlatformAdapter):
             return None
         sent = await _upload_as_one_message(self._client_for(chat_id, metadata), chat_id, files, thread_ts)
         await self._notify_unsent(chat_id, sent["unsent"] if sent is not None else files, thread_ts, metadata)
+        self._remember_sent_files(chat_id, thread_ts, (sent or {}).get("files") or [])
         return sent
+
+    # Threads whose next turn still owes the files a reply sent; the oldest go first past this many.
+    _SENT_FILES_MAX_THREADS = 500
+
+    def _remember_sent_files(self, chat_id: str, thread_ts: Optional[str], files: List[Dict[str, str]]) -> None:
+        """``extra.sent_files_in_next_turn``: keep the files a reply sent until the next turn of its thread."""
+        if not (files and self._extra_flag("sent_files_in_next_turn")):
+            return
+        owed = self.__dict__.setdefault("_sent_files_by_thread", {})
+        key = (chat_id, thread_ts or "")
+        owed[key] = [*owed.pop(key, []), *files]
+        while len(owed) > self._SENT_FILES_MAX_THREADS:
+            owed.pop(next(iter(owed)))
+
+    def _with_sent_files(self, channel_context: Optional[str], chat_id: str, thread_ts: Optional[str]) -> Optional[str]:
+        """The files the thread's last reply sent, once, as file markers with their Slack ids ahead of the
+        thread context; the session already holds the reply's text but not those ids."""
+        files = self.__dict__.get("_sent_files_by_thread", {}).pop((chat_id, thread_ts or ""), [])
+        if not files:
+            return channel_context
+        markers = " ".join(_slack_file_marker(
+            {"id": item["id"], "name": item["name"], "mimetype": mimetypes.guess_type(item["name"])[0] or ""},
+            with_id=True) for item in files)
+        line = f"[Files you sent in this thread: {markers}]"
+        return f"{line}\n\n{channel_context}" if channel_context else f"{line}\n"
 
     async def _notify_unsent(self, chat_id: str, paths: List[str], thread_ts: Optional[str],
                              metadata: Optional[Dict[str, Any]]) -> None:
@@ -4744,6 +4772,7 @@ class SlackAdapter(BasePlatformAdapter):
             channel_id=channel_id, event_thread_ts=event_thread_ts, ts=ts, user_id=user_id,
             team_id=team_id, is_thread_reply=is_thread_reply, is_mentioned=is_mentioned,
             is_dm=is_dm)
+        channel_context = self._with_sent_files(channel_context, channel_id, event_thread_ts)
         # Thread-root media is delivered ahead of the trigger message's own files.
         media_urls, media_types, media_text_inlined, text = await self._collect_inbound_media(
             event, channel_id, team_id, text, thread_root_media_urls, thread_root_media_types)
