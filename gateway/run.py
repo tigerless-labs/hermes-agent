@@ -2885,6 +2885,12 @@ def _gateway_config_home() -> Path:
     return Path(override) if override else _hermes_home
 
 
+def _binds_session_id_per_turn() -> bool:
+    """``gateway.bind_session_id_per_turn``: bind each turn's session id with its other session vars. Upstream
+    publishes the id only when an agent is built, so tools on a cached agent's later turns saw none."""
+    return bool((_load_gateway_config().get("gateway") or {}).get("bind_session_id_per_turn", False))
+
+
 def _load_gateway_config(config_path: "Path | None" = None) -> dict:
     """The effective user config.yaml (managed overlay, ``${VAR}`` expansion, model-key canon; no
     DEFAULT_CONFIG merge) — ``{}`` on any error (fail-open). Defaults to the active gateway home
@@ -4295,6 +4301,7 @@ class GatewayRunner(
             scope_id=str(getattr(context.source, "scope_id", "") or ""),
             parent_chat_id=str(getattr(context.source, "parent_chat_id", "") or ""),
             session_key=context.session_key,
+            session_id=context.session_id if _binds_session_id_per_turn() else "",
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
