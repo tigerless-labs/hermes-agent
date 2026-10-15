@@ -154,6 +154,26 @@ def _sandbox_visible_spillover_path(host_path: str, env) -> str | None:
     return None
 
 
+def _path_for_the_coming_sandbox(host_path: str) -> str:
+    """Where the session's container will read *host_path* once it starts, else *host_path*. With
+    ``terminal.docker_cache_scope: chat`` the docker backend mounts the current (or borrowed) chat's
+    caches when it creates the container, so a spill written before then already has its in-container
+    path. Shared caches, other backends and contexts outside any chat keep the host path."""
+    from hermes_constants import current_chat_cache_scope
+    from tools.credential_files import to_agent_visible_cache_path
+    from tools.terminal_scope import terminal_env
+    if not current_chat_cache_scope() or (terminal_env("TERMINAL_ENV") or "").strip().lower() != "docker":
+        return host_path
+    return to_agent_visible_cache_path(host_path)
+
+
+def _outside_any_chat() -> bool:
+    """With ``terminal.docker_cache_scope: chat``, a context that belongs to no chat (and borrows none) has
+    no exchange area, so nothing of it is written on the host."""
+    from hermes_constants import current_chat_cache_scope
+    return current_chat_cache_scope() == ""
+
+
 def _resolve_storage_dir(env) -> str:
     """Return the best temp-backed storage dir for this environment."""
     get_temp_dir = getattr(env, "get_temp_dir", None)
@@ -320,9 +340,11 @@ def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, en
         return _build_persisted_message(preview, has_more, len(persisted_content), path)
 
     # Always persist host-side first: cache/spillover is the single canonical home.
-    host_path = _write_to_spillover(persisted_content, filename)
+    host_path = None if _outside_any_chat() else _write_to_spillover(persisted_content, filename)
     host_side = _is_host_side_env(env)
     if host_side and host_path is not None:
+        if env is None and (visible := _path_for_the_coming_sandbox(host_path)) != host_path:
+            return _persisted(visible, f" [host: {host_path}]")
         return _persisted(host_path)
     if not host_side:
         # Remote backend: reference the mounted/synced path when the sandbox can actually read
