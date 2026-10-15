@@ -579,6 +579,8 @@ class GatewayBusySessionMixin:
         plain_text = (
             event.message_type == MessageType.TEXT and not event.media_urls and not event.media_types
         )
+        if effective_mode == "steer" and not self._steer_sender_allowed(event, session_key, running_agent):
+            effective_mode = "queue"
         if effective_mode == "steer":
             steer_text = await self._prepare_busy_steer_text(event)
             # Steerable: plain text, OR every attachment is voice media folded into steer_text.
@@ -589,7 +591,10 @@ class GatewayBusySessionMixin:
             _steer_all_voice = bool(_steer_media_urls) and (
                 len(self._pending_event_audio_paths(event)) == len(_steer_media_urls)
             )
-            if steer_text and (plain_text or _steer_all_voice) and agent_live and hasattr(running_agent, "steer"):
+            steerable = plain_text or _steer_all_voice
+            if not steerable and self._busy_steer_switch(event.source, "busy_steer_attachments"):
+                steer_text, steerable = self._steer_text_with_attachments(event, steer_text), True
+            if steer_text and steerable and agent_live and hasattr(running_agent, "steer"):
                 steered = self._try_agent_verb(
                     running_agent, "steer", steer_text, session_key, event=event
                 )
@@ -607,6 +612,45 @@ class GatewayBusySessionMixin:
             effective_mode=effective_mode, demoted_for_subagents=demoted_for_subagents,
             demoted_for_compression=demoted_for_compression, steered=steered, redirected=redirected,
         )
+
+    def _busy_steer_switch(self, source: SessionSource, setting: str) -> bool:
+        from gateway.run import _load_gateway_config, _platform_config_key
+        from gateway.display_config import resolve_display_setting
+        with self._profile_scope_for_source(source):
+            config = _load_gateway_config()
+        return resolve_display_setting(config, _platform_config_key(source.platform), setting, False) is True
+
+    def _steer_sender_allowed(self, event: MessageEvent, session_key: str, running_agent: Any) -> bool:
+        """``display.busy_steer_same_sender``: only the sender of the turn *running_agent* runs may steer
+        it. The turn's own context names that sender, also for a turn taken from the queue; a context
+        that is missing or belongs to another agent allows nothing."""
+        if not self._busy_steer_switch(event.source, "busy_steer_same_sender"):
+            return True
+        from gateway.steer_sender import same_sender
+        state = self._peek_session_state(session_key)
+        turn_ctx = state.turn.ctx if state else None
+        holder = getattr(turn_ctx, "agent_holder", None) or [None]
+        return holder[0] is running_agent and same_sender(getattr(turn_ctx, "source", None), event.source)
+
+    def _steer_text_with_attachments(self, event: MessageEvent, text: str) -> str:
+        """``display.busy_steer_attachments``: *text* led by a note per cached attachment, as a turn
+        gives them; an image note points at its path for vision_analyze. Voice already transcribed
+        into *text* gets no note."""
+        from gateway.run import (
+            _event_media_is_audio, _event_media_is_image, _event_media_is_stt_input, _event_media_is_video,
+        )
+        paths = list(event.media_urls or [])
+        audio_files = [path for index, path in enumerate(paths)
+                       if _event_media_is_audio(event, index) and not _event_media_is_stt_input(event, index)]
+        videos = [path for index, path in enumerate(paths) if _event_media_is_video(event, index)]
+        text = self._prepend_inbound_document_notes(event, text)
+        text = self._prepend_inbound_media_file_notes(text, audio_files, videos)
+        for index, path in enumerate(paths):
+            if _event_media_is_image(event, index):
+                display_name, agent_path = self._inbound_attachment_display_name(path)
+                text = (f"[The user sent an image: '{display_name}'. It is saved at: {agent_path}. "
+                        f"To see it, pass that path to vision_analyze.]\n\n{text}")
+        return text
 
     @staticmethod
     def _demote_interrupt(session_key: str, why: str) -> str:
@@ -1054,6 +1098,8 @@ class GatewayBusySessionMixin:
             return _queue_fallback("Agent still starting — /steer queued for the next turn.")
         if not running_agent or not hasattr(running_agent, "steer"):
             return _queue_fallback("No active agent — /steer queued for the next turn.")
+        if not self._steer_sender_allowed(event, quick_key, running_agent):
+            return _queue_fallback("Another person's turn is running — /steer queued as your own next turn.")
         try:
             accepted = self._steer_running_agent(running_agent, self._steer_text_with_origin(steer_text, event))
         except Exception as exc:
