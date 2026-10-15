@@ -161,6 +161,13 @@ def _path_for_the_coming_sandbox(host_path: str) -> str:
     return to_agent_visible_cache_path(host_path)
 
 
+def _outside_any_chat() -> bool:
+    """With ``terminal.docker_cache_scope: chat``, a context that belongs to no chat (and borrows none) has
+    no exchange area, so nothing of it is written on the host."""
+    from hermes_constants import current_chat_cache_scope
+    return current_chat_cache_scope() == ""
+
+
 def _resolve_storage_dir(env) -> str:
     """Return the best temp-backed storage dir for this environment."""
     get_temp_dir = getattr(env, "get_temp_dir", None)
@@ -285,7 +292,7 @@ def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, en
         return _build_persisted_message(preview, has_more, len(content), path)
 
     # Always persist host-side first: cache/spillover is the single canonical home.
-    host_path = _write_to_spillover(content, filename)
+    host_path = None if _outside_any_chat() else _write_to_spillover(content, filename)
     host_side = _is_host_side_env(env)
     if host_side and host_path is not None:
         if env is None and (visible := _path_for_the_coming_sandbox(host_path)) != host_path:

@@ -2,20 +2,23 @@
 
 The docker backend creates a session's container on its first terminal or code call and mounts the chat's
 caches then. A spill written earlier is referenced where that container will read it, so the model's first
-read lands. Shared caches, other backends and contexts outside any chat keep the upstream host path.
+read lands. A context outside any chat has no exchange area, so nothing of it lands on the host: with a
+sandbox the result goes into the sandbox only, without one the model gets it truncated inline. Shared caches
+and other backends keep the upstream host path.
 """
 
 from __future__ import annotations
 
 import posixpath
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from gateway.session_context import clear_session_vars, set_session_vars
 from hermes_constants import borrowed_chat_cache_scope
 from tools.credential_files import get_cache_directory_mounts
-from tools.tool_result_storage import extract_persisted_path, maybe_persist_tool_result
+from tools.tool_result_storage import PERSISTED_OUTPUT_TAG, extract_persisted_path, maybe_persist_tool_result
 
 THRESHOLD = 1_000
 CONTENT = "row," * THRESHOLD
@@ -94,11 +97,37 @@ def test_another_chats_container_cannot_read_the_spill(home: Path) -> None:
         assert _read_in_container(path) is None
 
 
+def _host_files(home: Path) -> list[Path]:
+    return [path for path in home.rglob("*") if path.is_file()]
+
+
 @pytest.mark.usefixtures("docker", "scoped")
-def test_outside_any_chat_keeps_the_host_path(home: Path) -> None:
-    path = _spill("call_no_chat")
+def test_redteam_outside_any_chat_without_a_sandbox_nothing_lands_on_the_host(home: Path) -> None:
+    result = maybe_persist_tool_result(content=CONTENT, tool_name="airtable__list_records_for_table",
+                                       tool_use_id="call_no_chat", env=None, threshold=THRESHOLD)
+    assert PERSISTED_OUTPUT_TAG not in result and CONTENT.startswith(result.split("\n\n")[0])
+    assert _host_files(home) == []
+
+
+@pytest.mark.usefixtures("docker", "scoped")
+def test_redteam_outside_any_chat_with_a_sandbox_the_result_goes_into_the_sandbox_only(home: Path) -> None:
+    sandbox = MagicMock()
+    sandbox.get_temp_dir.return_value = "/tmp"
+    sandbox.execute.side_effect = [{"output": "", "returncode": 0},
+                                   {"output": f"{len(CONTENT.encode())}\n", "returncode": 0}]
+    result = maybe_persist_tool_result(content=CONTENT, tool_name="airtable__list_records_for_table",
+                                       tool_use_id="call_no_chat_sandbox", env=sandbox, threshold=THRESHOLD)
+    path = extract_persisted_path(result)
+    assert path and not Path(path).is_relative_to(home)
+    assert any(path in str(call.args[0]) for call in sandbox.execute.call_args_list)
+    assert _host_files(home) == []
+
+
+@pytest.mark.usefixtures("docker")
+def test_shared_caches_outside_any_chat_keep_the_upstream_host_path(home: Path) -> None:
+    path = _spill("call_shared_no_chat")
+    assert Path(path).is_relative_to(home)
     assert Path(path).read_text(encoding="utf-8") == CONTENT
-    assert _read_in_container(path) is None
 
 
 @pytest.mark.usefixtures("docker")
