@@ -2074,6 +2074,7 @@ TERMINAL_CONFIG_ENV_MAP = {
             "docker_extra_args", "docker_shm_size", "docker_run_as_host_user", "docker_snap_compat",
             "docker_persist_across_processes", "docker_shared_container_key",
             "docker_orphan_reaper", "docker_cache_scope", "cache_max_age_hours", "sandbox_dir",
+            "compression_child_keeps_sandbox",
             "persistent_shell")}}
 
 

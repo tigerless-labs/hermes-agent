@@ -1656,6 +1656,19 @@ def _rebind_session_context(session_id: str) -> None:
         set_session_context(session_id)
 
 
+def _keep_sandbox_for_compression_child(child_session_id: str, parent_session_id: str) -> None:
+    """``terminal.compression_child_keeps_sandbox``: a session that compression moved onto a new id keeps its
+    container, through the alias a delegated child uses. Upstream leaves the container keyed by the old id, so
+    tools looking it up by the new one found none and the next turn started a fresh container."""
+    if not child_session_id or not parent_session_id or child_session_id == parent_session_id:
+        return
+    with _swallow('compression child sandbox alias failed: %s'):
+        from tools.terminal_tool import _ensure_terminal_env_bridged, _tenv_bool, register_container_alias
+        _ensure_terminal_env_bridged()
+        if _tenv_bool("TERMINAL_COMPRESSION_CHILD_KEEPS_SANDBOX", "false"):
+            register_container_alias(child_session_id, parent_session_id)
+
+
 def _adopt_live_compression_child(
     agent: Any, session_db: Any, parent_session_id: str
 ) -> Optional[List[Dict[str, Any]]]:
@@ -1691,6 +1704,7 @@ def _adopt_live_compression_child(
         return None
     agent.session_id = child_session_id
     _rebind_session_context(child_session_id)
+    _keep_sandbox_for_compression_child(child_session_id, parent_session_id)
     agent._session_db_created = True
     if child.get("system_prompt"):
         agent._cached_system_prompt = child["system_prompt"]
@@ -3369,6 +3383,7 @@ def _publish_rotated_compaction(
     agent.session_id = new_session_id
     agent._db_flush_scan_prefix = None
     _rebind_session_context(agent.session_id)
+    _keep_sandbox_for_compression_child(agent.session_id, old_session_id)
     agent._session_db_created = True
     _carry_session_state_to_child(agent, old_session_id, old_title)
 

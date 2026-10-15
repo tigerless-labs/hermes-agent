@@ -354,6 +354,10 @@ DEFAULT_CONFIG = {
         # Hours before every cache sweep (uploads, screenshots, spillover, session temp) deletes a file;
         # a whole number >= 1, anything else keeps 24.
         "cache_max_age_hours": 24,
+        # True: a session that compression moves onto a new id keeps its container (the child id aliases to the
+        # parent's), so tools and the next turn still reach the files made before the split. False keeps
+        # upstream's behaviour: the container stays keyed by the old id.
+        "compression_child_keeps_sandbox": False,
         "docker_network": True,  # false = --network=none, no network access from commands
         "docker_extra_args": [],        # Extra flags passed verbatim to docker run
         # /dev/shm size for the Docker sandbox. Docker's 64 MB default silently breaks

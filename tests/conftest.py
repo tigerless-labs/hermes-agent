@@ -392,6 +392,7 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     # writes every terminal key to os.environ) moves or keeps unrelated tests' cache files.
     "TERMINAL_DOCKER_CACHE_SCOPE",
     "TERMINAL_CACHE_MAX_AGE_HOURS",
+    "TERMINAL_COMPRESSION_CHILD_KEEPS_SANDBOX",
     "BROWSER_CDP_URL",
     "CAMOFOX_URL",
     # Platform allowlists — not credentials, but if set from any source
