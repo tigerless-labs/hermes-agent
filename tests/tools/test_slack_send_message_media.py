@@ -367,3 +367,80 @@ def test_a_text_too_long_to_ride_along_posts_on_top_and_its_files_go_into_its_th
     finally:
         for path in paths:
             os.unlink(path)
+
+
+def test_one_message_answers_with_each_sent_files_slack_id_under_the_name_the_chat_shows():
+    paths = [_tmpfile(suffix) for suffix in (".xlsx", ".png")]
+    client, uploaded = _one_message_client("D0DM")
+    try:
+        result = _send_one_message(client, "D0DM", "Here are the files", paths)
+        assert result["files"] == [{"id": f"F1{index}", "name": os.path.basename(path)}
+                                   for index, path in enumerate(paths)]
+    finally:
+        for path in paths:
+            os.unlink(path)
+
+
+def test_files_continued_in_further_messages_are_answered_in_the_order_they_went_up():
+    from plugins.platforms.slack.adapter import _FILES_PER_UPLOAD
+
+    paths = [_tmpfile(".csv") for _ in range(_FILES_PER_UPLOAD + 2)]
+    client, uploaded = _one_message_client("D0DM")
+    try:
+        result = _send_one_message(client, "D0DM", "many", paths)
+        assert [entry["name"] for entry in result["files"]] == [os.path.basename(path) for path in paths]
+        assert [entry["id"] for entry in result["files"]] == (
+            [f"F1{index}" for index in range(_FILES_PER_UPLOAD)] + ["F20", "F21"])
+    finally:
+        for path in paths:
+            os.unlink(path)
+
+
+def test_a_missing_file_is_not_answered_as_sent():
+    path = _tmpfile(".pdf")
+    missing = path + ".gone"
+    client, uploaded = _one_message_client("D0DM")
+    try:
+        result = _send_one_message(client, "D0DM", "report", [path, missing])
+        assert [entry["name"] for entry in result["files"]] == [os.path.basename(path)]
+    finally:
+        os.unlink(path)
+
+
+def test_files_that_went_into_the_texts_thread_after_a_failed_upload_are_answered_too():
+    path = _tmpfile(".pdf")
+    client, uploaded = _one_message_client("D0DM")
+    succeeding = client.files_upload_v2.side_effect
+
+    async def first_upload_fails(**kwargs):
+        if not uploaded:
+            uploaded.append(kwargs)
+            return {"ok": False, "error": "invalid_arguments"}
+        return await succeeding(**kwargs)
+
+    client.files_upload_v2 = AsyncMock(side_effect=first_upload_fails)
+    try:
+        result = _send_one_message(client, "D0DM", "report", [path])
+        assert uploaded[1]["thread_ts"] == "111.222"
+        assert result["files"] == [{"id": "F20", "name": os.path.basename(path)}]
+    finally:
+        os.unlink(path)
+
+
+def test_files_that_never_went_up_are_not_answered_as_sent():
+    path = _tmpfile(".pdf")
+    client, uploaded = _one_message_client("D0DM", upload_ok=False)
+    try:
+        result = _send_one_message(client, "D0DM", "report", [path])
+        assert result.get("files", []) == []
+    finally:
+        os.unlink(path)
+
+
+def test_an_upload_answer_naming_other_files_than_were_sent_keeps_slacks_own_names():
+    from plugins.platforms.slack.adapter import _sent_file_entries
+
+    assert _sent_file_entries([{"id": "F1", "title": "chart.png"}], ["/tmp/a.png", "/tmp/b.png"]) == [
+        {"id": "F1", "name": "chart.png"}]
+    assert _sent_file_entries([{"title": "no id"}, "junk", {"id": "F2", "name": "b.png"}], ["/tmp/x"]) == [
+        {"id": "F2", "name": "b.png"}]
