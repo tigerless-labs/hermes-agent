@@ -2276,6 +2276,10 @@ DEFAULT_CONFIG = {
         # mounts inside it; the copy lands in the chat's cache. Bridged to
         # HERMES_MEDIA_TRUST_SESSION_SANDBOX. Only consulted when strict is true.
         "trust_session_sandbox": False,
+        # True: each turn binds its session id with the other session vars, from the turn's session record.
+        # Upstream publishes the id only when an agent is built, so on a cached agent's later turns tools saw
+        # none (no sandbox fetch, no process owner). False keeps upstream's behaviour.
+        "bind_session_id_per_turn": False,
         "api_server": {  # OpenAI-compatible API server platform (gateway/platforms/api_server.py).
             # Max concurrent agent runs. Requests to /v1/chat/completions, /v1/responses, and
             # /v1/runs beyond this get HTTP 429 + Retry-After, bounding CPU/memory/LLM-quota

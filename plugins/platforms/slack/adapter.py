@@ -6,6 +6,7 @@ import functools
 import inspect
 import json
 import logging
+import mimetypes
 import contextlib
 import os
 import re
@@ -2381,6 +2382,7 @@ class SlackAdapter(BasePlatformAdapter):
             sent = await _upload_as_one_message(self._client_for(chat_id, metadata), chat_id, files, thread_ts, **rides)
         if sent is not None:
             await self._notify_unsent(chat_id, sent["unsent"], thread_ts, metadata)
+            self._remember_sent_files(chat_id, thread_ts, sent.get("files") or [])
             message_id = sent["message_id"]
         else:
             message_id = None
@@ -2401,7 +2403,33 @@ class SlackAdapter(BasePlatformAdapter):
             return None
         sent = await _upload_as_one_message(self._client_for(chat_id, metadata), chat_id, files, thread_ts)
         await self._notify_unsent(chat_id, sent["unsent"] if sent is not None else files, thread_ts, metadata)
+        self._remember_sent_files(chat_id, thread_ts, (sent or {}).get("files") or [])
         return sent
+
+    # Threads whose next turn still owes the files a reply sent; the oldest go first past this many.
+    _SENT_FILES_MAX_THREADS = 500
+
+    def _remember_sent_files(self, chat_id: str, thread_ts: Optional[str], files: List[Dict[str, str]]) -> None:
+        """``extra.sent_files_in_next_turn``: keep the files a reply sent until the next turn of its thread."""
+        if not (files and self._extra_flag("sent_files_in_next_turn")):
+            return
+        owed = self.__dict__.setdefault("_sent_files_by_thread", {})
+        key = (chat_id, thread_ts or "")
+        owed[key] = [*owed.pop(key, []), *files]
+        while len(owed) > self._SENT_FILES_MAX_THREADS:
+            owed.pop(next(iter(owed)))
+
+    def _with_sent_files(self, channel_context: Optional[str], chat_id: str, thread_ts: Optional[str]) -> Optional[str]:
+        """The files the thread's last reply sent, once, as file markers with their Slack ids ahead of the
+        thread context; the session already holds the reply's text but not those ids."""
+        files = self.__dict__.get("_sent_files_by_thread", {}).pop((chat_id, thread_ts or ""), [])
+        if not files:
+            return channel_context
+        markers = " ".join(_slack_file_marker(
+            {"id": item["id"], "name": item["name"], "mimetype": mimetypes.guess_type(item["name"])[0] or ""},
+            with_id=True) for item in files)
+        line = f"[Files you sent in this thread: {markers}]"
+        return f"{line}\n\n{channel_context}" if channel_context else f"{line}\n"
 
     async def _notify_unsent(self, chat_id: str, paths: List[str], thread_ts: Optional[str],
                              metadata: Optional[Dict[str, Any]]) -> None:
@@ -4866,6 +4894,7 @@ class SlackAdapter(BasePlatformAdapter):
             channel_id=channel_id, event_thread_ts=event_thread_ts, ts=ts, user_id=user_id,
             team_id=team_id, is_thread_reply=is_thread_reply, is_mentioned=is_mentioned,
             is_dm=is_dm)
+        channel_context = self._with_sent_files(channel_context, channel_id, event_thread_ts)
         # Thread-root media is delivered ahead of the trigger message's own files.
         media_urls, media_types, media_text_inlined, text = await self._collect_inbound_media(
             event, channel_id, team_id, text, thread_root_media_urls, thread_root_media_types)
@@ -7168,9 +7197,10 @@ async def _upload_as_one_message(
 ) -> Optional[Dict[str, Any]]:
     """Every file in ``paths`` as ONE message carrying ``blocks_json`` or ``comment``; files past
     ``_FILES_PER_UPLOAD`` continue in further messages inside ``thread_ts``, or inside the first message's
-    thread when it is top-level. Answers ``{"message_id", "warnings", "unsent"}``; None when nothing went
-    up, so the caller sends another way."""
+    thread when it is top-level. Answers ``{"message_id", "warnings", "unsent", "files"}`` (``files``: each sent
+    file's Slack id and name, in upload order); None when nothing went up, so the caller sends another way."""
     warnings: List[str] = []
+    sent_files: List[Dict[str, str]] = []
     unsent = [path for path in paths if not os.path.exists(path)]
     warnings.extend(f"Media file not found, skipping: {path}" for path in unsent)
     present = [path for path in paths if os.path.exists(path)]
@@ -7199,11 +7229,21 @@ async def _upload_as_one_message(
             warnings.append(f"Failed to send media batch from file {index + 1}: {payload.get('error', 'unknown')}")
             unsent.extend(batch)
             continue
+        sent_files.extend(_sent_file_entries(payload["files"], batch))
         if index == 0:
             message_id = await _message_ts_of_upload(client, payload["files"][0], chat_id)
     for warning in warnings:
         logger.warning("[Slack] %s", warning)
-    return {"message_id": message_id, "warnings": warnings, "unsent": unsent}
+    return {"message_id": message_id, "warnings": warnings, "unsent": unsent, "files": sent_files}
+
+
+def _sent_file_entries(uploaded: list, paths: List[str]) -> List[Dict[str, str]]:
+    """``{"id", "name"}`` per file an upload answered with: named as the chat shows it (the local file's own
+    name, in upload order) when the answer lists one file per path, else by Slack's own name or title."""
+    local_names = [os.path.basename(path) for path in paths] if len(uploaded) == len(paths) else []
+    return [{"id": str(item["id"]),
+             "name": local_names[index] if local_names else str(item.get("name") or item.get("title") or "")}
+            for index, item in enumerate(uploaded) if isinstance(item, dict) and item.get("id")]
 
 
 async def _standalone_send_media(
@@ -7235,12 +7275,15 @@ async def _standalone_send_media(
             text_ts = text_post.get("ts") if text_post.get("ok", True) else None
             files = await _upload_as_one_message(client, chat_id, paths, thread_id or text_ts)
             sent = {"message_id": text_ts or (files or {}).get("message_id"),
-                    "warnings": (files or {}).get("warnings", []) or ([] if files else ["Failed to send the files"])}
+                    "warnings": (files or {}).get("warnings", []) or ([] if files else ["Failed to send the files"]),
+                    "files": (files or {}).get("files", [])}
         if sent is not None:
             result: Dict[str, Any] = {"success": True, "platform": "slack", "chat_id": chat_id,
                                       "message_id": sent["message_id"]}
             if sent["warnings"]:
                 result["warnings"] = sent["warnings"]
+            if sent.get("files"):
+                result["files"] = sent["files"]
             return result
     last_message_id = None
     # The upload API cannot carry unfurl controls; explicit ones need a separate caption post.
