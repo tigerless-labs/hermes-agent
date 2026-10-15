@@ -26,6 +26,10 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     "long_running_notifications": True,
     "busy_ack_detail": True,
     "busy_steer_ack_enabled": True,  # busy_input_mode=steer echo; the text still lands in the run
+    # Steer only from the running turn's own sender; anyone else queues (gateway/steer_sender.py).
+    "busy_steer_same_sender": False,
+    # A steer may carry the files the adapter already cached, as the notes a turn gives them.
+    "busy_steer_attachments": False,
     # Delete tool-progress / "⏳ Working" bubbles after a SUCCESSFUL final response where deletion is
     # supported (Telegram); failed runs keep them as breadcrumbs.
     "cleanup_progress": False,
@@ -207,6 +211,8 @@ _NORMALISERS: dict[str, Any] = {
     "long_running_notifications": _norm_long_running,
     "busy_ack_detail": _norm_bool,
     "busy_steer_ack_enabled": _norm_bool,
+    "busy_steer_same_sender": _norm_bool,
+    "busy_steer_attachments": _norm_bool,
     "thinking_progress": _norm_bool,
     "cleanup_progress": _norm_cleanup_progress,
     "live_status": _norm_tristate("full", "off", {"full", "verb", "off"}, extra_truthy={"all"}),
