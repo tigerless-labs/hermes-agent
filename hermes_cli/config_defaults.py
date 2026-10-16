@@ -202,6 +202,9 @@ DEFAULT_CONFIG = {
         # A turn the adapter marked as one that must be answered (reply_expected True) that ends on a
         # bare silence marker is asked once more to reply before the gateway's fallback notice.
         "reply_required_nudge": False,
+        # The turn's last read of the steer buffer also closes it until the next turn starts: a steer
+        # arriving after it is refused, and the gateway queues the message as its own turn.
+        "steer_closes_at_turn_end": False,
         # Inactivity warning (seconds), once per run before gateway_timeout; no interrupt. 0 = off.
         "gateway_timeout_warning": 900,
         # Max seconds any surface (CLI, TUI/Desktop, messaging gateway) blocks an agent awaiting a

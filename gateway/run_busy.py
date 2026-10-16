@@ -1129,6 +1129,8 @@ class GatewayBusySessionMixin:
         except Exception as exc:
             logger.warning("Steer failed for session %s: %s", quick_key, exc)
             return f"⚠️ Steer failed: {exc}"
+        if not accepted and getattr(running_agent, "steer_intake_closed", lambda: False)():
+            return _queue_fallback("This turn just finished — /steer queued as your next turn.")
         if not accepted:
             return "Steer rejected (empty payload)."
         preview = steer_text[:60] + ("..." if len(steer_text) > 60 else "")
