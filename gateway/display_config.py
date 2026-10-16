@@ -30,6 +30,8 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     "busy_steer_same_sender": False,
     # A steer may carry the files the adapter already cached, as the notes a turn gives them.
     "busy_steer_attachments": False,
+    # A steer keeps its message's reply verdict (gateway/steer_reply_expected.py).
+    "busy_steer_reply_expected": False,
     # Delete tool-progress / "⏳ Working" bubbles after a SUCCESSFUL final response where deletion is
     # supported (Telegram); failed runs keep them as breadcrumbs.
     "cleanup_progress": False,
@@ -213,6 +215,7 @@ _NORMALISERS: dict[str, Any] = {
     "busy_steer_ack_enabled": _norm_bool,
     "busy_steer_same_sender": _norm_bool,
     "busy_steer_attachments": _norm_bool,
+    "busy_steer_reply_expected": _norm_bool,
     "thinking_progress": _norm_bool,
     "cleanup_progress": _norm_cleanup_progress,
     "live_status": _norm_tristate("full", "off", {"full", "verb", "off"}, extra_truthy={"all"}),

@@ -3624,6 +3624,31 @@ class GatewayTurnMixin:
             if callable(_mark_turn):
                 _mark_turn(turn_ctx.session_key, turn_ctx.run_generation)
 
+    def _settle_turn_steers(self, turn_ctx: TurnContext, result: Any, response: Any) -> None:
+        """``display.busy_steer_reply_expected``: judge the steers this turn took in. Those the model
+        read fold into the turn's verdict, which the reply also carries as its chain's terminal
+        verdict; those still in the leftover steer text give the next turn their combined verdict."""
+        state = self._peek_session_state(turn_ctx.session_key)
+        if state is None or not state.turn.steers:
+            return
+        from gateway import steer_reply_expected
+
+        leftover_text = result.get("pending_steer") if isinstance(result, dict) else None
+        read, leftover = steer_reply_expected.split(state.turn.steers, leftover_text)
+        state.turn.steers = []
+        turn_ctx.reply_expected = steer_reply_expected.combined(turn_ctx.reply_expected, read)
+        turn_ctx.leftover_steer_reply_expected = (
+            steer_reply_expected.combined(False, leftover) if leftover else None)
+        if isinstance(response, dict):
+            response["queued_terminal_reply_expected"] = turn_ctx.reply_expected
+
+    @staticmethod
+    def _leftover_steer_reply_expected(turn_ctx: Any, pending: Optional[str], result: Any) -> Optional[bool]:
+        """The verdict for a follow-up made of this turn's leftover steer text, and nothing else."""
+        if not pending or not isinstance(result, dict) or pending != result.get("pending_steer"):
+            return None
+        return getattr(turn_ctx, "leftover_steer_reply_expected", None)
+
     async def _run_agent_drain_pending(
         self, result: Any, adapter: Any, source: SessionSource, session_key: Optional[str]
     ) -> tuple[Any, Optional[str]]:
@@ -3856,7 +3881,9 @@ class GatewayTurnMixin:
         # Queued Discord turns carry the same routing note as first turns; persist the authored text.
         next_persist_message = None
         next_display_kind = display_kind_for_event(pending_event)
-        next_reply_expected = pending_event.reply_expected if pending_event is not None else None
+        next_reply_expected = (
+            pending_event.reply_expected if pending_event is not None
+            else self._leftover_steer_reply_expected(turn_ctx, pending, result))
         # See #60671.
         if pending_event is not None:
             next_source = getattr(pending_event, "source", None) or source
@@ -3968,7 +3995,7 @@ class GatewayTurnMixin:
                 **merged,
                 "queued_terminal_inbound_id": next_inbound_id,
                 "queued_terminal_display_kind": next_display_kind,
-                "queued_terminal_reply_expected": next_reply_expected,
+                "queued_terminal_reply_expected": merged.get("queued_terminal_reply_expected", next_reply_expected),
                 "queued_terminal_notification_category": (
                     (pending_event.metadata or {}).get("notification_category", "result")
                     if pending_event is not None and pending_event.internal else "result"),
@@ -4349,6 +4376,7 @@ class GatewayTurnMixin:
 
             # Interrupted OR queued message (/queue)?
             result = turn_ctx.result_holder[0]
+            self._settle_turn_steers(turn_ctx, result, response)
             adapter = self._delivery_adapter_for(source)
             await self._run_agent_finalize_streaming_tts(turn_ctx, adapter)
             pending_event, pending = await self._run_agent_drain_pending(result, adapter, source, session_key)

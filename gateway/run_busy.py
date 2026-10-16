@@ -658,6 +658,29 @@ class GatewayBusySessionMixin:
         holder = getattr(turn_ctx, "agent_holder", None) or [None]
         return holder[0] is running_agent and same_sender(getattr(turn_ctx, "source", None), event.source)
 
+    def _steer_running_agent_for(
+        self, running_agent: Any, text: str, event: Optional[MessageEvent], session_key: str
+    ) -> bool:
+        """:meth:`_steer_running_agent` with *event*'s message; an accepted steer is recorded for
+        ``display.busy_steer_reply_expected``."""
+        accepted = self._steer_running_agent(running_agent, text)
+        if accepted and event is not None:
+            self._record_steer(running_agent, text, event, session_key)
+        return accepted
+
+    def _record_steer(self, running_agent: Any, text: str, event: MessageEvent, session_key: str) -> None:
+        """``display.busy_steer_reply_expected``: the steer joins the turn slot *running_agent* holds
+        with its message, judged when that turn ends; an addressed one also arms the reply reminder,
+        so a silent last answer asks once more and the steer lands in that retry."""
+        if not self._busy_steer_switch(event.source, "busy_steer_reply_expected"):
+            return
+        state = self._peek_session_state(session_key)
+        if state is None or state.turn.agent is not running_agent:
+            return
+        state.turn.steers.append((text.strip(), event))
+        if event.reply_expected is True:
+            running_agent._reply_required = True
+
     def _steer_text_with_attachments(self, event: MessageEvent, text: str) -> str:
         """``display.busy_steer_attachments``: *text* led by a note per cached attachment, as a turn
         gives them; an image note points at its path for vision_analyze. Voice already transcribed
@@ -690,7 +713,7 @@ class GatewayBusySessionMixin:
         try:
             call_text = self._steer_text_with_origin(text, event) if event else text
             if verb == "steer":
-                return self._steer_running_agent(running_agent, call_text)
+                return self._steer_running_agent_for(running_agent, call_text, event, session_key)
             return bool(getattr(running_agent, verb)(call_text))
         except Exception as exc:
             logger.warning("Gateway %s failed for session %s: %s", verb, session_key, exc)
@@ -1135,7 +1158,8 @@ class GatewayBusySessionMixin:
         if not self._steer_sender_allowed(event, quick_key, running_agent):
             return _queue_fallback("Another person's turn is running — /steer queued as your own next turn.")
         try:
-            accepted = self._steer_running_agent(running_agent, self._steer_text_with_origin(steer_text, event))
+            accepted = self._steer_running_agent_for(
+                running_agent, self._steer_text_with_origin(steer_text, event), event, quick_key)
         except Exception as exc:
             logger.warning("Steer failed for session %s: %s", quick_key, exc)
             return t("gateway.steer.failed", error=exc)
