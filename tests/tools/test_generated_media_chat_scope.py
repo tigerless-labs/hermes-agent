@@ -52,7 +52,14 @@ class _Chat:
 
 
 def _chat_cache(home: Path, kind: str, chat_id: str) -> Path:
-    return home / "cache" / kind / "chats" / chat_scope_slug("slack", chat_id)
+    top, _, rest = kind.partition("/")
+    root = home / "cache" / top / "chats" / chat_scope_slug("slack", chat_id)
+    return root / rest if rest else root
+
+
+def _backend_kinds() -> list[str]:
+    from agent import image_gen_provider, video_gen_provider
+    return [image_gen_provider._GENERATED_IMAGE_KIND, video_gen_provider._GENERATED_VIDEO_KIND]
 
 
 def _written_files(home: Path) -> list[Path]:
@@ -65,7 +72,7 @@ def test_shared_caches_keep_the_upstream_path(home: Path) -> None:
     assert saved.parent == home / "cache" / "images"
 
 
-@pytest.mark.parametrize("kind", ["images", "videos"])
+@pytest.mark.parametrize("kind", ["images", "videos", *_backend_kinds()])
 def test_generated_media_land_in_the_chats_own_cache(home: Path, scoped: None, kind: str) -> None:
     with _Chat("slack", "C1"):
         saved = provider_media.save_b64(kind, _B64, prefix="gen", extension="png")
@@ -159,3 +166,19 @@ def test_a_meta_image_outside_any_chat_is_an_error_not_a_file(home: Path, scoped
     assert result["success"] is False
     assert result["error_type"] == "io_error"
     assert _written_files(home) == []
+
+
+@pytest.mark.parametrize("kind", _backend_kinds())
+def test_what_a_backend_generates_is_deliverable_and_mounted_in_its_own_chat(
+        home: Path, scoped: None, kind: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The backends save under nested kinds (generated/images); the chat's part of the cache is still
+    cache/<top>/chats/<chat>, the root delivery, vision and the sandbox mounts all use."""
+    from gateway.platforms import base
+    from tools.credential_files import get_cache_directory_mounts
+    monkeypatch.setattr(base, "_profile_cache_roots", lambda: [])
+    with _Chat("slack", "C1"):
+        saved = provider_media.save_b64(kind, _B64, prefix="gen", extension="png").resolve()
+        delivered = base.validate_media_delivery_path(str(saved))
+        mounted = [Path(m["host_path"]).resolve() for m in get_cache_directory_mounts()]
+    assert delivered == str(saved)
+    assert any(root in saved.parents for root in mounted)
