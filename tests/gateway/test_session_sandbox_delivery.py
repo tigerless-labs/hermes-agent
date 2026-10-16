@@ -408,3 +408,22 @@ def test_the_switch_is_off_by_default_known_to_the_config_and_bridged_to_the_env
 
     monkeypatch.setattr(media_policy, "_routed_gateway_cfg", lambda: {"trust_session_sandbox": False})
     assert not media_policy.media_delivery_trust_session_sandbox()
+
+
+def test_redteam_a_sessionless_reply_never_falls_back_to_a_shared_sandbox_key(
+        home: Path, sandboxes: dict, trusted: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A background run delivers with a session id but no session key. Without per-session isolation
+    the container-key resolver maps that id to ``default``; strict delivery still looks only under
+    the id itself."""
+    from gateway.media_fetch import fetch_remote_media
+    from gateway.session_context import delivering_session_vars
+    monkeypatch.setenv("TERMINAL_CONTAINER_PERSISTENT", "true")
+    sandboxes["default"] = _Sandbox({REPORT: b"shared"})
+
+    async def background_reply():
+        clear_session_vars([])
+        with delivering_session_vars(platform="slack", chat_id=CHAT, session_key="", session_id=lambda: OWN):
+            return fetch_remote_media(REPORT)
+
+    assert asyncio.run(background_reply()) is None
+    assert sandboxes["default"].fetched == []

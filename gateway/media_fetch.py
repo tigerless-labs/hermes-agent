@@ -85,9 +85,14 @@ def _own_session_sandbox():
     """The delivering session's own per-session sandbox, or None. Strict delivery trusts no other: not
     a shared container, not another session's, and not one named by a session id from ``os.environ``."""
     from gateway.session_context import delivering_session_id
-    from tools.terminal_tool_lifecycle import get_active_env
+    from tools.terminal_tool import _active_environments, _env_lock, _qualify_task_key
     session_id = delivering_session_id()
-    env = get_active_env(session_id) if session_id else None
+    if not session_id:
+        return None
+    # The session's own key only: the container-key resolver falls back to shared keys ("default",
+    # profile:<name>) when per-session isolation is not in effect, and those are never this session's.
+    with _env_lock:
+        env = _active_environments.get(_qualify_task_key(session_id)) or _active_environments.get(session_id)
     return env if getattr(env, "_session_scoped", False) else None
 
 
