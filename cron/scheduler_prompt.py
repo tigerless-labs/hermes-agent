@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from hermes_time import now as _hermes_now
+from utils import is_truthy_value
 from typing import Optional
 
 # Log-record parity with the origin module.
@@ -241,6 +242,23 @@ _CRON_HINT = (
     "treat phrasing like \"each Monday\" or \"every day at 9\" as "
     "context for this run, not as a request to schedule another job.]\n\n"
 )
+_CRON_HINT_SILENT = (
+    "SILENT: If there is genuinely nothing new to report, respond "
+    "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
+    "[SILENT] is a literal ASCII control token — never translate or "
+    "rephrase it, whatever language the rest of your answer uses. "
+    "Never combine [SILENT] with content — either report your "
+    "findings normally, or say [SILENT] and nothing more. "
+)
+
+
+def _cron_hint() -> str:
+    """``cron.silent_marker_hint: false`` drops the [SILENT] part, for a deployment whose runs say
+    "nothing to report" another way; unset or true keeps upstream's hint."""
+    cron_config = (_sched.load_config() or {}).get("cron") or {}
+    if is_truthy_value(cron_config.get("silent_marker_hint"), default=True):
+        return _CRON_HINT
+    return _CRON_HINT.replace(_CRON_HINT_SILENT, "", 1)
 
 
 def _build_job_prompt(
@@ -295,7 +313,7 @@ def _build_job_prompt(
         prompt = f"{notepad_section}{prompt}"
         has_injected_data = True
 
-    prompt = _CRON_HINT + prompt
+    prompt = _cron_hint() + prompt
     skill_names = _job_skill_names(job)
     if not skill_names:
         return _scan_assembled_cron_prompt(
