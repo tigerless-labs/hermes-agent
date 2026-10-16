@@ -64,6 +64,10 @@ try:
 except ImportError:  # pragma: no cover - plugin loaded outside package context
     from files import (FILE_NOT_A_REFERENCE, FILE_NOT_IN_THIS_CONVERSATION, FILE_NOT_KEPT,  # type: ignore
                        FILE_UNREADABLE, ConversationFile, file_id_of, kept_key, shared_in, slack_file_id)
+try:
+    from .inbound_markdown import slack_mrkdwn_to_markdown
+except ImportError:  # pragma: no cover - plugin loaded outside package context
+    from inbound_markdown import slack_mrkdwn_to_markdown  # type: ignore
 
 
 logger = logging.getLogger(__name__)
@@ -4246,9 +4250,11 @@ class SlackAdapter(BasePlatformAdapter):
         return False
 
     @staticmethod
-    def _append_block_text(text: str, blocks: list, bot_uid: str) -> str:
-        """Merge Block Kit rich text not already in ``text`` plus the redacted block payload."""
-        blocks_text = _extract_additional_text_from_slack_blocks(blocks, text, bot_uid=bot_uid)
+    def _append_block_text(text: str, blocks: list, bot_uid: str, slack_text: Optional[str] = None) -> str:
+        """Merge Block Kit rich text not already in ``text`` plus the redacted block payload.
+        ``slack_text``: the Slack text ``text`` was converted from, which the blocks are compared with."""
+        blocks_text = _extract_additional_text_from_slack_blocks(
+            blocks, text if slack_text is None else slack_text, bot_uid=bot_uid)
         stripped_blocks = blocks_text.strip() if blocks_text else ""
         if stripped_blocks:
             logger.debug(
@@ -4694,13 +4700,14 @@ class SlackAdapter(BasePlatformAdapter):
         if command_probe_text != original_text.lstrip():
             original_text = command_probe_text
         is_command_text = command_probe_text.startswith("/")
-        text = original_text
+        text = slack_mrkdwn_to_markdown(original_text) if self._slack_inbound_markdown() else original_text
         # Quoted/forwarded block text is absent from flat ``text``. Skipped for commands: after
         # the ``!``→``/`` rewrite it no longer dedupes and would become bogus arguments.
         blocks = event.get("blocks")
         if blocks and not is_command_text:
             text = self._append_block_text(
-                text, blocks, self._team_bot_user_ids.get(dedup_team_id, self._bot_user_id) or "")
+                text, blocks, self._team_bot_user_ids.get(dedup_team_id, self._bot_user_id) or "",
+                slack_text=original_text)
         text = self._append_link_unfurls(text, event.get("attachments") or [])
         ts = event.get("ts", "")
         outer_team_id = dedup_team_id
@@ -6136,6 +6143,8 @@ class SlackAdapter(BasePlatformAdapter):
             msg_text = self._render_message_text(msg, bot_uid=bot_uid, file_ids=self._files_by_id())
             if not msg_text:
                 continue
+            if self._slack_inbound_markdown():
+                msg_text = slack_mrkdwn_to_markdown(msg_text)
             if bot_uid:
                 msg_text = msg_text.replace(f"<@{bot_uid}>", "").strip()
             if is_parent:
@@ -6629,6 +6638,8 @@ class SlackAdapter(BasePlatformAdapter):
         "thread_context_unseen_only", "SLACK_THREAD_CONTEXT_UNSEEN_ONLY")
     # group_chat_flag: each admitted message carries metadata["slack_group_chat"], the adapter's verdict.
     _slack_group_chat_flag = _extra_or_env_flag_getter("group_chat_flag", "SLACK_GROUP_CHAT_FLAG")
+    # inbound_markdown: the Slack text the agent reads arrives as Markdown, the inverse of format_message.
+    _slack_inbound_markdown = _extra_or_env_flag_getter("inbound_markdown", "SLACK_INBOUND_MARKDOWN")
     # expected_reply_cues: the :eyes: reaction and the loading status follow ``reply_expected``.
     _slack_expected_reply_cues = _extra_or_env_flag_getter(
         "expected_reply_cues", "SLACK_EXPECTED_REPLY_CUES")
