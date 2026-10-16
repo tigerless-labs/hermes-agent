@@ -31,11 +31,15 @@ class TurnState:
     # token for their own generation, so a displaced turn's unwind frees only its own lease and
     # never a successor's (an evicted turn and its replacement may both hold one briefly).
     lease_tokens: Dict[int, Any] = field(default_factory=dict)
+    # ``display.busy_steer_reply_expected``: (text the agent got, message) per accepted steer not yet
+    # judged; each turn of a queued chain judges the ones it took in (gateway/steer_reply_expected.py).
+    steers: List[Tuple[str, Any]] = field(default_factory=list)
 
     def clear(self) -> None:
         """Reset the per-turn slot.  The caller pops ``lease`` first to release it."""
         self.agent = self.lease = self.event = self.ctx = None
         self.started_ts = self.busy_ack_ts = 0.0
+        self.steers = []
 
 
 @dataclass
