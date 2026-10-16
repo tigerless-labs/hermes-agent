@@ -203,14 +203,31 @@ def _should_redact_pii(platform: Platform, enabled: bool) -> bool:
         return False
 
 
+def _slack_tools_via_plugin() -> bool:
+    """``platforms.slack.extra.slack_tools_via_plugin``: a plugin provides this deployment's Slack
+    tools (for example read through a tool hub as the person speaking). Only ``true`` counts."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        platforms = (load_config_readonly() or {}).get("platforms") or {}
+        extra = (platforms.get("slack") or {}).get("extra") or {}
+        return extra.get("slack_tools_via_plugin") is True
+    except Exception:
+        return False
+
+
 def _slack_tools_loaded() -> bool:
     """True iff the agent will actually have Slack tools this session.
 
     Either the native `slack` toolset is enabled AND `SLACK_BOT_TOKEN` is set (the tool's
     `check_fn` gates on it), or an MCP server whose name suggests Slack has ACTUALLY registered
     tools (configured-but-unconnected does not count; MCP servers are process-wide, so this is
-    intentionally not per-session). False on any error so a bad config never promises tools.
+    intentionally not per-session), or the deployment declares plugin-provided Slack tools
+    (``platforms.slack.extra.slack_tools_via_plugin``). False on any error so a bad config never
+    promises tools.
     """
+    if _slack_tools_via_plugin():
+        return True
     try:
         from tools.mcp_tool_discovery import get_registered_mcp_server_names
         if any("slack" in name.lower() for name in get_registered_mcp_server_names()):
