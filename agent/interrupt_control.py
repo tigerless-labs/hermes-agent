@@ -266,11 +266,14 @@ class InterruptControlMixin:
 
     def steer(self, text: str) -> bool:
         """Queue user text for delivery as its own user row after the current tool batch finishes (no
-        interrupt); multiple calls concatenate with newlines. Returns False for empty text."""
+        interrupt); multiple calls concatenate with newlines. Returns False for empty text, and once the
+        turn's last read closed the buffer (``agent.steer_closes_at_turn_end``)."""
         if not text or not text.strip():
             return False
         cleaned = text.strip()
         with _ic_lock(self, "_pending_steer_lock"):
+            if getattr(self, "_steer_closed", False):
+                return False
             existing = _ic_slot(self, "_pending_steer_lock", "_pending_steer")
             self._pending_steer = (existing + "\n" + cleaned) if existing else cleaned
         # The turn no longer ran on its own (first-task-done detection reads this off the result).
@@ -358,3 +361,18 @@ class InterruptControlMixin:
             text = _ic_slot(self, "_pending_steer_lock", "_pending_steer")
             self._pending_steer = None
         return text
+
+    def _last_steer_read(self, *, close: bool) -> Optional[str]:
+        """The turn's last read of the steer buffer. With *close* the buffer closes under the same lock,
+        so a racing steer is either in this read or refused; the next turn opens it again."""
+        with _ic_lock(self, "_pending_steer_lock"):
+            text = _ic_slot(self, "_pending_steer_lock", "_pending_steer")
+            self._pending_steer = None
+            if close:
+                self._steer_closed = True
+        return text
+
+    def steer_intake_closed(self) -> bool:
+        """True from the turn's closing last read until the next turn starts."""
+        with _ic_lock(self, "_pending_steer_lock"):
+            return bool(getattr(self, "_steer_closed", False))

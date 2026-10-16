@@ -101,6 +101,17 @@ def _clone_background_review_messages(messages):
     return [_clone_message_for_send(message) for message in messages]
 
 
+def _steer_closes_at_turn_end() -> bool:
+    """``agent.steer_closes_at_turn_end``; an unreadable config keeps upstream's open buffer."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        return ((load_config_readonly() or {}).get("agent") or {}).get("steer_closes_at_turn_end") is True
+    except Exception:
+        logging.getLogger(__name__).debug("steer_closes_at_turn_end lookup failed", exc_info=True)
+        return False
+
+
 def _invoke_hook_safely(name: str, logger: logging.Logger, **kwargs) -> list:
     """Fire a lifecycle plugin hook; a failing hook is logged, never fatal."""
     try:
@@ -744,7 +755,8 @@ def finalize_turn(
         result["cleanup_errors"] = _cleanup_errors
     # A /steer landing after the final assistant turn has no tool batch to drain into;
     # hand it back so it becomes the next user turn instead of being lost.
-    _leftover_steer = agent._drain_pending_steer()
+    _leftover_steer = (agent._last_steer_read(close=True) if _steer_closes_at_turn_end()
+                       else agent._drain_pending_steer())
     if _leftover_steer:
         result["pending_steer"] = _leftover_steer
     agent._response_was_previewed = False

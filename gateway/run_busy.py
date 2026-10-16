@@ -1163,6 +1163,8 @@ class GatewayBusySessionMixin:
         except Exception as exc:
             logger.warning("Steer failed for session %s: %s", quick_key, exc)
             return t("gateway.steer.failed", error=exc)
+        if not accepted and getattr(running_agent, "steer_intake_closed", lambda: False)():
+            return _queue_fallback("This turn just finished — /steer queued as your next turn.")
         if not accepted:
             return t("gateway.steer.rejected_empty")
         self._fold_into_running_turn(running_agent, quick_key, event)
