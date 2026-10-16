@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Move the fork's own commits (branch lara) onto the newest upstream release and run the fork's own tests.
+# Releases are vYYYY.M.D or vX.Y.Z tags; the newest is the latest by date, since the two schemes do not sort together.
 #
 #   scripts/lara_track_upstream.sh [--target <tag>] [--force] [--upstream <remote>] [--lara <ref>]
 #
@@ -23,8 +24,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-release_tag='^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}$'
-release_tags() { git tag --list 'v*' --sort=-version:refname | grep -E "$release_tag" || true; }
+release_tag='^v[0-9]+\.[0-9]+\.[0-9]+$'
+release_tags() { git tag --list 'v*' --sort=-creatordate | grep -E "$release_tag" || true; }
 
 git fetch --quiet --tags "$upstream"
 base=""
