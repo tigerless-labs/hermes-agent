@@ -16,6 +16,9 @@ class TurnContext:
     # read-only turn identity / wiring
     source: Any = None
     reply_expected: Optional[bool] = None
+    # ``display.busy_steer_reply_expected``: the combined verdict of the steers this turn left over,
+    # for the next turn they become; None (unknown, as upstream) when none were recorded.
+    leftover_steer_reply_expected: Optional[bool] = None
     # Scheduled heartbeats are proactive work, not replies to the source message that
     # registered the watch.  Their routine delivery surfaces stay quiet.
     scheduled_heartbeat: bool = False
