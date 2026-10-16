@@ -29,15 +29,19 @@ _MAX_SAVE_URL_REDIRECTS = 5
 
 
 def cache_dir(kind: str) -> Path:
-    """Return ``$HERMES_HOME/cache/<kind>/`` (the current chat's own part of it when caches are scoped
-    by chat), creating parents as needed. Raises ``PermissionError`` in a context outside any chat."""
+    """Return ``$HERMES_HOME/cache/<kind>/``, creating parents as needed. When caches are scoped by chat it is
+    the current chat's own part, ``cache/<top>/chats/<chat>/<rest>`` for a nested kind such as
+    ``generated/images``: the root delivery, vision and the sandbox mounts use. Raises ``PermissionError``
+    in a context outside any chat."""
     from hermes_constants import chat_scoped_roots, get_hermes_home
-    roots = chat_scoped_roots([get_hermes_home() / "cache" / kind])
+    top, _, rest = kind.partition("/")
+    roots = chat_scoped_roots([get_hermes_home() / "cache" / top])
     if not roots:
         raise PermissionError("generated media can only be saved inside a chat: caches are scoped by chat "
                               "and this context belongs to none")
-    roots[0].mkdir(parents=True, exist_ok=True)
-    return roots[0]
+    directory = roots[0] / rest if rest else roots[0]
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 def cache_path(kind: str, prefix: str, extension: str) -> Path:
