@@ -21,6 +21,10 @@ ADVISOR_BLOCK_TYPES = frozenset({"server_tool_use", "advisor_tool_result"})
 ADVISOR_ITERATION = "advisor_message"
 PAUSED = "pause_turn"
 DEFAULT_RESUMES = 1
+# Anthropic's mid-conversation nudge for executors that under-call the advisor (Haiku only).
+NUDGE_TEXT = ("You have not consulted the advisor yet. If the task has a non-obvious design decision or a failure mode "
+              "you haven't ruled out, call advisor now before committing to an approach.")
+NUDGED_FAMILY = "haiku"
 
 
 def advisor_tool(config: Optional[dict]) -> Optional[dict[str, Any]]:
@@ -38,8 +42,14 @@ def advisor_tool(config: Optional[dict]) -> Optional[dict[str, Any]]:
     return tool
 
 
-def apply_advisor(kwargs: dict, *, model: str, base_url: Optional[str], is_oauth: bool, tool: Optional[dict]) -> None:
-    """Add the advisor tool and its beta to built Messages kwargs, in place."""
+def nudge_turn(config: Optional[dict]) -> int:
+    """The assistant turn before which an executor that has not consulted the advisor is nudged; 0 = never."""
+    return int(((config or {}).get("advisor") or {}).get("nudge_turn") or 0)
+
+
+def apply_advisor(kwargs: dict, *, model: str, base_url: Optional[str], is_oauth: bool, tool: Optional[dict],
+                  nudge_turn: int = 0) -> None:
+    """Add the advisor tool and its beta to built Messages kwargs, in place; nudge an under-calling Haiku."""
     from agent.anthropic_adapter import (
         _beta_header, _common_betas_for_base_url, _is_claude_model, _is_third_party_anthropic_endpoint,
     )
@@ -51,6 +61,27 @@ def apply_advisor(kwargs: dict, *, model: str, base_url: Optional[str], is_oauth
     headers = dict(kwargs.get("extra_headers") or {})
     current = [b for b in headers.get("anthropic-beta", "").split(",") if b] or _common_betas_for_base_url(base_url)
     kwargs["extra_headers"] = {**headers, **_beta_header([*current, ADVISOR_BETA])}
+    if nudge_turn and NUDGED_FAMILY in str(model).lower():
+        _nudge(kwargs["messages"], nudge_turn)
+
+
+def _is_question(message: dict) -> bool:
+    content = message.get("content")
+    if message.get("role") != "user":
+        return False
+    return isinstance(content, str) or any(isinstance(b, dict) and b.get("type") != "tool_result" for b in content or [])
+
+
+def _consulted(message: dict) -> bool:
+    return any(isinstance(b, dict) and b.get("type") == "server_tool_use" and b.get("name") == ADVISOR_TOOL_NAME
+               for b in message.get("content") or [] if isinstance(message.get("content"), list))
+
+
+def _nudge(messages: list[dict], turn: int) -> None:
+    asked = max((i for i, m in enumerate(messages) if _is_question(m)), default=-1)
+    replies = [m for m in messages[asked + 1:] if m.get("role") == "assistant"]
+    if len(replies) == turn - 1 and not any(_consulted(m) for m in replies):
+        messages.append({"role": "user", "content": NUDGE_TEXT})
 
 
 def advisor_in(kwargs: dict) -> Optional[dict]:

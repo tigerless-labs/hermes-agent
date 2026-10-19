@@ -1389,10 +1389,11 @@ def _build_anthropic_kwargs(agent, api_messages, tools_for_api, reasoning_config
         fast_mode=request_overrides.get("speed") == "fast",
         drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)))
     # Lara fork: the configured advisor rides on the main conversation (agent/anthropic_advisor.py).
-    from agent.anthropic_advisor import advisor_tool, apply_advisor
+    from agent.anthropic_advisor import advisor_tool, apply_advisor, nudge_turn
     from hermes_cli.config import load_config_readonly
+    _config = load_config_readonly()
     apply_advisor(anthropic_kwargs, model=agent.model, base_url=getattr(agent, "_anthropic_base_url", None),
-                  is_oauth=bool(agent._is_anthropic_oauth), tool=advisor_tool(load_config_readonly()))
+                  is_oauth=bool(agent._is_anthropic_oauth), tool=advisor_tool(_config), nudge_turn=nudge_turn(_config))
     # Portal reads ``tags`` / ``session_id`` on its Messages route too, but the profile hook
     # is only consulted by the OpenAI-wire transport — merge here to keep sticky routing.
     return _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs)

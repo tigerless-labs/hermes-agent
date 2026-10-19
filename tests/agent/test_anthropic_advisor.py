@@ -173,3 +173,42 @@ def test_a_stream_without_advisor_usage_leaves_the_final_message_as_it_is():
     final = SimpleNamespace(usage=SimpleNamespace(input_tokens=10, output_tokens=5))
     advisor.carry_iterations(final, {"usage": {"input_tokens": 10, "output_tokens": 5}})
     assert not hasattr(final.usage, "iterations")
+
+
+NUDGED = {"advisor": {**CONFIG["advisor"], "nudge_turn": 2}}
+ASK = {"role": "user", "content": "how many new orders?"}
+CALL_LOOKUP = {"role": "assistant", "content": [THOUGHT, {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}]}
+LOOKED_UP = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "6"}]}
+CONSULTED = {"role": "assistant", "content": [THOUGHT, CONSULT, ADVICE,
+                                               {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}]}
+
+
+def nudged(messages, model=EXECUTOR, config=NUDGED):
+    kwargs = {"model": model, "messages": [dict(m) for m in messages], "tools": []}
+    advisor.apply_advisor(kwargs, model=model, base_url=NATIVE, is_oauth=False, tool=advisor.advisor_tool(config),
+                          nudge_turn=advisor.nudge_turn(config))
+    return kwargs["messages"]
+
+
+def test_a_haiku_that_has_not_consulted_by_its_second_turn_is_nudged_with_anthropic_s_wording():
+    sent = nudged([ASK, CALL_LOOKUP, LOOKED_UP])
+    assert sent[-1] == {"role": "user", "content": advisor.NUDGE_TEXT}
+    assert sent[:-1] == [ASK, CALL_LOOKUP, LOOKED_UP]
+
+
+@pytest.mark.parametrize("messages", [[ASK], [ASK, CONSULTED, LOOKED_UP],
+                                      [ASK, CALL_LOOKUP, LOOKED_UP, CALL_LOOKUP, LOOKED_UP]])
+def test_no_nudge_on_the_first_turn_after_a_consultation_or_past_the_nudge_turn(messages):
+    assert nudged(messages) == messages
+
+
+def test_each_new_question_counts_its_own_turns():
+    earlier = [ASK, CALL_LOOKUP, LOOKED_UP, {"role": "assistant", "content": [{"type": "text", "text": "6"}]}]
+    sent = nudged(earlier + [ASK, CALL_LOOKUP, LOOKED_UP])
+    assert sent[-1]["content"] == advisor.NUDGE_TEXT
+
+
+@pytest.mark.parametrize("model,config", [("claude-sonnet-5-5", NUDGED), (EXECUTOR, CONFIG)])
+def test_no_nudge_for_an_executor_that_is_not_haiku_or_when_the_nudge_is_off(model, config):
+    messages = [ASK, CALL_LOOKUP, LOOKED_UP]
+    assert nudged(messages, model=model, config=config) == messages
