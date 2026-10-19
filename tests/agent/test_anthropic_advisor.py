@@ -246,3 +246,25 @@ def test_an_advisor_call_that_failed_is_logged_with_its_error_code(caplog):
     with caplog.at_level(logging.INFO, logger=advisor.logger.name):
         advisor.log_advisor_usage(message([CONSULT, failed, {"type": "text", "text": "ok"}], "end_turn"))
     assert "Advisor failed: too_many_requests" in caplog.text
+
+
+def test_an_advisor_call_logged_off_the_session_s_thread_carries_that_session_s_tag(caplog):
+    import threading
+
+    import hermes_logging
+
+    reply = message([], "end_turn", [{"type": "advisor_message", "model": "claude-sonnet-5-5", "input_tokens": 60000,
+                                      "output_tokens": 1600}])
+    seen = {}
+
+    def worker():
+        with caplog.at_level(logging.INFO, logger=advisor.logger.name):
+            advisor.log_advisor_usage(reply, session_id="20261019_173252_aa0ee4e1")
+        seen["after"] = getattr(hermes_logging._session_context, "session_id", None)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+    logged = [r for r in caplog.records if "Advisor call" in r.getMessage()]
+    assert [r.session_tag for r in logged] == [" [20261019_173252_aa0ee4e1]"]
+    assert seen["after"] is None

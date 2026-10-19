@@ -1044,7 +1044,7 @@ class ClientLifecycleMixin:
                 prefer_stream=not bool(getattr(self, "_disable_streaming", False)),
                 on_response=self._capture_anthropic_response_headers,
             )
-            log_advisor_usage(reply, getattr(self, "log_prefix", ""))
+            log_advisor_usage(reply, getattr(self, "log_prefix", ""), getattr(self, "session_id", None))
             return reply
         return resume_paused(send, api_kwargs, send(api_kwargs))
 

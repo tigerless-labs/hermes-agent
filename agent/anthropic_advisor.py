@@ -8,9 +8,10 @@ while the advisor is still working; it is resent with the partial reply until th
 The advisor's tokens are not in the request's top-level usage, so they are logged on their own line.
 """
 
+import contextlib
 import copy
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,25 @@ def resume_paused(send: Callable[[dict], Any], kwargs: dict, reply: Any) -> Any:
     return final
 
 
-def log_advisor_usage(reply: Any, log_prefix: str = "") -> None:
+@contextlib.contextmanager
+def _logged_as(session_id: Optional[str]) -> Iterator[None]:
+    """Tag log lines with the request's session on a worker thread that has no session of its own."""
+    import hermes_logging
+    previous = getattr(hermes_logging._session_context, "session_id", None)
+    if session_id:
+        hermes_logging.set_session_context(session_id)
+    try:
+        yield
+    finally:
+        hermes_logging.set_session_context(previous)
+
+
+def log_advisor_usage(reply: Any, log_prefix: str = "", session_id: Optional[str] = None) -> None:
+    with _logged_as(session_id):
+        _log_advisor_usage(reply, log_prefix)
+
+
+def _log_advisor_usage(reply: Any, log_prefix: str) -> None:
     for block in getattr(reply, "content", None) or []:
         content = getattr(block, "content", None)
         if getattr(block, "type", None) == "advisor_tool_result" and _field(content, "type") == "advisor_tool_result_error":

@@ -3755,7 +3755,7 @@ class _StreamingCall(StreamingWaitMonitor):
         # Lara fork: a turn the advisor paused is resent until it ends (agent/anthropic_advisor.py).
         from agent.anthropic_advisor import log_advisor_usage, resume_paused
         reply = self._call_anthropic(request_client)
-        log_advisor_usage(reply, getattr(self.agent, "log_prefix", ""))
+        log_advisor_usage(reply, getattr(self.agent, "log_prefix", ""), getattr(self.agent, "session_id", None))
         return resume_paused(lambda kwargs: self._resume_paused_anthropic(request_client, kwargs), self.api_kwargs, reply)
 
     def _resume_paused_anthropic(self, request_client, kwargs):
@@ -3765,7 +3765,7 @@ class _StreamingCall(StreamingWaitMonitor):
             reply = self._call_anthropic(request_client)
         finally:
             self.api_kwargs = original
-        log_advisor_usage(reply, getattr(self.agent, "log_prefix", ""))
+        log_advisor_usage(reply, getattr(self.agent, "log_prefix", ""), getattr(self.agent, "session_id", None))
         return reply
 
     def _call(self):
