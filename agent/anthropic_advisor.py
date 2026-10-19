@@ -99,5 +99,7 @@ def log_advisor_usage(reply: Any, log_prefix: str = "") -> None:
     for iteration in getattr(usage, "iterations", None) or []:
         data = iteration if isinstance(iteration, dict) else getattr(iteration, "__dict__", {})
         if data.get("type") == ADVISOR_ITERATION:
-            logger.info("%sAdvisor call: model=%s in=%d out=%d", log_prefix, data.get("model", "unknown"),
-                        int(data.get("input_tokens") or 0), int(data.get("output_tokens") or 0))
+            logger.info("%sAdvisor call: model=%s in=%d out=%d cache=%d write=%d", log_prefix,
+                        data.get("model", "unknown"), int(data.get("input_tokens") or 0),
+                        int(data.get("output_tokens") or 0), int(data.get("cache_read_input_tokens") or 0),
+                        int(data.get("cache_creation_input_tokens") or 0))

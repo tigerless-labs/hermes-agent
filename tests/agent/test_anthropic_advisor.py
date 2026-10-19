@@ -137,11 +137,12 @@ def test_without_an_advisor_a_paused_turn_is_left_to_upstream():
 def test_what_the_advisor_spent_is_logged_on_its_own_line(caplog):
     reply = message([ADVICE], "end_turn", iterations=[
         {"type": "message", "input_tokens": 1224, "output_tokens": 499},
-        {"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 3060, "output_tokens": 751},
+        {"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 3060, "output_tokens": 751,
+         "cache_read_input_tokens": 2000, "cache_creation_input_tokens": 900},
     ])
     with caplog.at_level(logging.INFO, logger=advisor.logger.name):
         advisor.log_advisor_usage(reply)
-    assert "Advisor call: model=claude-opus-5-5 in=3060 out=751" in caplog.text
+    assert "Advisor call: model=claude-opus-5-5 in=3060 out=751 cache=2000 write=900" in caplog.text
 
 
 def _agent(model=EXECUTOR):
