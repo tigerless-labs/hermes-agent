@@ -36,6 +36,7 @@ from tools.delegate_tool_config import (
     _subagent_auto_approve, _subagent_auto_deny,
 )
 from tools.delegate_tool_dispatch import _Batch, _announce_batch, _capture_origin, _run_batch
+from tools.delegate_tool_models import child_model, unlisted_model, with_model_choice
 from tools.delegate_tool_progress import (
     DelegateEvent, SUBAGENT_FAILURE_STATUSES, _batch_prefix, _build_child_progress_callback,
     _build_child_system_prompt, _clean_error_text, _emit_parent_console, _quiet, _resolve_workspace_hint,
@@ -432,7 +433,7 @@ def _build_children(
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
-                model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
+                model=child_model(t, routing_cfg, creds["model"]), max_iterations=max_iterations, task_count=len(task_list),
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
             )
         except ValueError as exc:
@@ -542,6 +543,8 @@ def delegate_task(
         return tool_error(str(exc))
     max_children = _get_max_concurrent_children()
     task_list, err = _normalize_task_list(goal, context, tasks, output_schema, top_role, max_children)
+    if not err:
+        err = unlisted_model(task_list, routing_cfg)
     if not err:
         task_schemas, err = _coerce_task_schemas(task_list, output_schema)
     if not err:
@@ -682,7 +685,7 @@ def _build_dynamic_schema_overrides() -> dict:
 
     return {
         "description": _build_top_level_description(independent_completions=independent_completions),
-        "parameters": overrides_params,
+        "parameters": with_model_choice(overrides_params, _load_config()),
     }
 
 def _p(type_: str, description: str, **extra) -> dict:

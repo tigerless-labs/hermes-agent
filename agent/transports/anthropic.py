@@ -98,6 +98,10 @@ class AnthropicTransport(ProviderTransport):
         signed = any(b.get("type") in _THINKING_TYPES and (b.get("signature") or b.get("data")) for b in ordered_blocks)
         if signed and any(b.get("type") == "tool_use" for b in ordered_blocks):
             provider_data["anthropic_content_blocks"] = ordered_blocks
+        # Lara fork: a reply that consulted the advisor replays in order (agent/anthropic_advisor.py).
+        from agent.anthropic_advisor import carries_advice
+        if carries_advice(ordered_blocks):
+            provider_data["anthropic_content_blocks"] = ordered_blocks
         return NormalizedResponse(
             content="\n".join(text_parts) if text_parts else None, tool_calls=tool_calls or None,
             finish_reason=self.response_finish_reason(response),

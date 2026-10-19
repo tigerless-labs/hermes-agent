@@ -1388,6 +1388,13 @@ def _build_anthropic_kwargs(agent, api_messages, tools_for_api, reasoning_config
         base_url=getattr(agent, "_anthropic_base_url", None),
         fast_mode=request_overrides.get("speed") == "fast",
         drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)))
+    # Lara fork: the configured advisor rides on the main conversation (agent/anthropic_advisor.py).
+    from agent.anthropic_advisor import advisor_tool, apply_advisor, nudge_turn
+    from hermes_cli.config import load_config_readonly
+    _config = load_config_readonly()
+    apply_advisor(anthropic_kwargs, model=agent.model, base_url=getattr(agent, "_anthropic_base_url", None),
+                  is_oauth=bool(agent._is_anthropic_oauth), tool=advisor_tool(_config), nudge_turn=nudge_turn(_config),
+                  delegated=getattr(agent, "_delegate_depth", 0) > 0)
     # Portal reads ``tags`` / ``session_id`` on its Messages route too, but the profile hook
     # is only consulted by the OpenAI-wire transport — merge here to keep sticky routing.
     return _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs)
@@ -3397,6 +3404,7 @@ class _StreamingCall(StreamingWaitMonitor):
         self._attempt_request_client = request_client
         _stream_context = {"manager": None, "stream": None}
         base_final_message = None
+        advisor_iterations = None  # Lara fork: see agent/anthropic_advisor.py
         text_watch, thinking_watch = RunawayStreamWatch(), RunawayStreamWatch()
         runaway = None
 
@@ -3437,6 +3445,9 @@ class _StreamingCall(StreamingWaitMonitor):
                     saw_message_stop = True
                 elif event_type == "message_delta":
                     self._mark_finish_seen(_diag, getattr(getattr(event, "delta", None), "stop_reason", None))
+                    # Lara fork: the advisor's usage rides on message_delta; the SDK's final message drops it.
+                    from agent.anthropic_advisor import iterations_of
+                    advisor_iterations = iterations_of(event) or advisor_iterations
                 elif event_type == "content_block_start":
                     block = getattr(event, "content_block", None)
                     if block and getattr(block, "type", None) == "tool_use":
@@ -3474,6 +3485,9 @@ class _StreamingCall(StreamingWaitMonitor):
                 _stop_details = accumulator.finalize().get("stop_details")
                 if _stop_details is not None and getattr(base_final_message, "stop_details", None) is None:
                     base_final_message.stop_details = _stop_details
+                # Lara fork: likewise the advisor's usage.iterations (agent/anthropic_advisor.py).
+                from agent.anthropic_advisor import carry_iterations
+                carry_iterations(base_final_message, {"usage": {"iterations": advisor_iterations}})
         finally:
             try:
                 self._close_managed_stream()
@@ -3738,7 +3752,21 @@ class _StreamingCall(StreamingWaitMonitor):
         # Per-request client so the watchdog aborts its socket, not the shared one.
         request_client = self.clients.set_client(
             self.agent._create_request_anthropic_client(reason="anthropic_stream_request"), kind="anthropic_messages")
-        return self._call_anthropic(request_client)
+        # Lara fork: a turn the advisor paused is resent until it ends (agent/anthropic_advisor.py).
+        from agent.anthropic_advisor import account_advisor_usage, resume_paused
+        reply = self._call_anthropic(request_client)
+        account_advisor_usage(reply, self.agent)
+        return resume_paused(lambda kwargs: self._resume_paused_anthropic(request_client, kwargs), self.api_kwargs, reply)
+
+    def _resume_paused_anthropic(self, request_client, kwargs):
+        from agent.anthropic_advisor import account_advisor_usage
+        original, self.api_kwargs = self.api_kwargs, kwargs
+        try:
+            reply = self._call_anthropic(request_client)
+        finally:
+            self.api_kwargs = original
+        account_advisor_usage(reply, self.agent)
+        return reply
 
     def _call(self):
         _max_stream_retries = env_int("HERMES_STREAM_RETRIES", 2)

@@ -1,0 +1,333 @@
+"""Anthropic's advisor tool on the main conversation (fork addition, off unless ``advisor.model`` is set)."""
+
+import copy
+import logging
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+
+from agent import anthropic_advisor as advisor
+from agent.anthropic_adapter import _common_betas_for_base_url, build_anthropic_kwargs
+from agent.anthropic_message_convert import convert_messages_to_anthropic
+from agent.transports.anthropic import AnthropicTransport
+
+NATIVE = "https://api.anthropic.com"
+EXECUTOR = "claude-haiku-5-5"
+CONFIG = {"advisor": {"model": "claude-opus-5-5", "max_uses": 3, "max_tokens": 2048, "caching": "5m"}}
+LOOKUP = {"type": "function", "function": {"name": "lookup", "description": "Count orders.",
+                                           "parameters": {"type": "object", "properties": {}}}}
+ADVICE = {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1",
+          "content": {"type": "advisor_redacted_result", "encrypted_content": "opaque-advice"}}
+CONSULT = {"type": "server_tool_use", "id": "srvtoolu_1", "name": "advisor", "input": {}}
+THOUGHT = {"type": "thinking", "thinking": "which orders count?", "signature": "sig-1"}
+
+
+def built(model=EXECUTOR, base_url=NATIVE):
+    return build_anthropic_kwargs(model=model, messages=[{"role": "user", "content": "how many new orders?"}],
+                                  tools=[LOOKUP], max_tokens=1000, reasoning_config=None, base_url=base_url)
+
+
+def betas(kwargs):
+    return {b for b in (kwargs.get("extra_headers") or {}).get("anthropic-beta", "").split(",") if b}
+
+
+def block(data):
+    return SimpleNamespace(**data, model_dump=lambda **_: copy.deepcopy(data))
+
+
+def message(blocks, stop_reason, iterations=()):
+    return SimpleNamespace(content=[block(b) for b in blocks], stop_reason=stop_reason,
+                           usage=SimpleNamespace(input_tokens=10, output_tokens=5, iterations=list(iterations)))
+
+
+def test_without_an_advisor_model_the_request_is_exactly_what_upstream_builds():
+    kwargs = built()
+    before = copy.deepcopy(kwargs)
+    advisor.apply_advisor(kwargs, model=EXECUTOR, base_url=NATIVE, is_oauth=False, tool=advisor.advisor_tool({}))
+    assert kwargs == before
+
+
+def test_an_advisor_rides_as_a_server_tool_with_its_beta_and_the_client_betas_kept():
+    kwargs = built()
+    advisor.apply_advisor(kwargs, model=EXECUTOR, base_url=NATIVE, is_oauth=False, tool=advisor.advisor_tool(CONFIG))
+    tool = next(t for t in kwargs["tools"] if t.get("type") == advisor.ADVISOR_TOOL_TYPE)
+    assert tool["model"] == CONFIG["advisor"]["model"] and tool["name"] == advisor.ADVISOR_TOOL_NAME
+    assert tool["max_uses"] == CONFIG["advisor"]["max_uses"] and tool["max_tokens"] == CONFIG["advisor"]["max_tokens"]
+    assert tool["caching"] == {"type": "ephemeral", "ttl": CONFIG["advisor"]["caching"]}
+    assert any(t.get("name") == "lookup" for t in kwargs["tools"])
+    assert advisor.ADVISOR_BETA in betas(kwargs)
+    assert set(_common_betas_for_base_url(NATIVE)) <= betas(kwargs)
+
+
+def test_a_beta_the_request_already_carries_survives_the_advisor():
+    kwargs = built()
+    kwargs["extra_headers"] = {"anthropic-beta": "some-beta-2026-01-01"}
+    advisor.apply_advisor(kwargs, model=EXECUTOR, base_url=NATIVE, is_oauth=False, tool=advisor.advisor_tool(CONFIG))
+    assert {"some-beta-2026-01-01", advisor.ADVISOR_BETA} <= betas(kwargs)
+
+
+@pytest.mark.parametrize("model,base_url,is_oauth", [
+    (EXECUTOR, "https://openrouter.ai/api", False),
+    ("muse-spark-1.3", NATIVE, False),
+    (EXECUTOR, NATIVE, True),
+])
+def test_redteam_no_advisor_off_the_native_api_key_route_or_for_a_model_that_is_not_claude(model, base_url, is_oauth):
+    kwargs = built(model=model, base_url=base_url)
+    before = copy.deepcopy(kwargs)
+    advisor.apply_advisor(kwargs, model=model, base_url=base_url, is_oauth=is_oauth, tool=advisor.advisor_tool(CONFIG))
+    assert kwargs == before
+
+
+def test_a_reply_that_consulted_the_advisor_keeps_every_block_in_order():
+    normalized = AnthropicTransport().normalize_response(
+        message([THOUGHT, CONSULT, ADVICE, {"type": "text", "text": "6 paid orders"}], "end_turn"))
+    ordered = normalized.provider_data["anthropic_content_blocks"]
+    assert [b["type"] for b in ordered] == ["thinking", "server_tool_use", "advisor_tool_result", "text"]
+    assert next(b for b in ordered if b["type"] == "advisor_tool_result")["content"] == ADVICE["content"]
+
+
+def test_the_advice_goes_back_on_the_wire_verbatim_in_its_place_without_output_only_fields():
+    stored = [THOUGHT, {**CONSULT, "caller": {"type": "direct"}}, {**ADVICE, "citations": None},
+              {"type": "text", "text": "6 paid orders"}]
+    _, wire = convert_messages_to_anthropic([
+        {"role": "user", "content": "how many new orders?"},
+        {"role": "assistant", "content": "6 paid orders", "anthropic_content_blocks": stored},
+        {"role": "user", "content": "and last year?"},
+    ], base_url=NATIVE, model=EXECUTOR)
+    replayed = wire[1]["content"]
+    assert [b["type"] for b in replayed] == ["thinking", "server_tool_use", "advisor_tool_result", "text"]
+    assert replayed[1] == CONSULT and replayed[2] == ADVICE
+
+
+def test_a_turn_paused_on_the_advisor_is_resent_and_the_parts_join_into_one_reply():
+    paused = message([THOUGHT, CONSULT], advisor.PAUSED)
+    done = message([ADVICE, {"type": "text", "text": "6 paid orders"}], "end_turn")
+    sent = []
+
+    def send(kwargs):
+        sent.append(kwargs)
+        return done
+
+    kwargs = built()
+    advisor.apply_advisor(kwargs, model=EXECUTOR, base_url=NATIVE, is_oauth=False, tool=advisor.advisor_tool(CONFIG))
+    joined = advisor.resume_paused(send, kwargs, paused)
+    assert joined.stop_reason == "end_turn"
+    assert [b.type for b in joined.content] == ["thinking", "server_tool_use", "advisor_tool_result", "text"]
+    assert sent[0]["messages"][-1] == {"role": "assistant", "content": [THOUGHT, CONSULT]}
+    assert sent[0]["messages"][:-1] == kwargs["messages"]
+
+
+def test_a_paused_turn_is_resent_at_most_as_often_as_the_advisor_may_be_used():
+    paused = message([CONSULT], advisor.PAUSED)
+    send = MagicMock(return_value=paused)
+    kwargs = built()
+    advisor.apply_advisor(kwargs, model=EXECUTOR, base_url=NATIVE, is_oauth=False, tool=advisor.advisor_tool(CONFIG))
+    advisor.resume_paused(send, kwargs, paused)
+    assert send.call_count <= CONFIG["advisor"]["max_uses"]
+
+
+def test_without_an_advisor_a_paused_turn_is_left_to_upstream():
+    paused = message([CONSULT], advisor.PAUSED)
+    send = MagicMock()
+    assert advisor.resume_paused(send, built(), paused) is paused
+    send.assert_not_called()
+
+
+def test_what_the_advisor_spent_is_logged_on_its_own_line(caplog):
+    reply = message([ADVICE], "end_turn", iterations=[
+        {"type": "message", "input_tokens": 1224, "output_tokens": 499},
+        {"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 3060, "output_tokens": 751,
+         "cache_read_input_tokens": 2000, "cache_creation_input_tokens": 900},
+    ])
+    with caplog.at_level(logging.INFO, logger=advisor.logger.name):
+        advisor.log_advisor_usage(reply)
+    assert "Advisor call: model=claude-opus-5-5 in=3060 out=751 cache=2000 write=900" in caplog.text
+
+
+def _agent(model=EXECUTOR):
+    from run_agent import AIAgent
+    agent = AIAgent(api_key="test-key", base_url=NATIVE, model=model, quiet_mode=True, skip_context_files=True,
+                    skip_memory=True)
+    agent.api_mode = "anthropic_messages"
+    return agent
+
+
+@pytest.mark.parametrize("config,expected", [(CONFIG, True), ({}, False)])
+def test_the_main_conversation_carries_the_advisor_only_when_one_is_configured(monkeypatch, config, expected):
+    from agent import chat_completion_helpers
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: config)
+    kwargs = chat_completion_helpers._build_anthropic_kwargs(
+        _agent(), [{"role": "user", "content": "how many new orders?"}], [LOOKUP], None, {})
+    assert (advisor.advisor_in(kwargs) is not None) is expected
+
+
+def test_redteam_a_delegated_child_carries_no_advisor_whatever_model_it_runs_on(monkeypatch):
+    from agent import chat_completion_helpers
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: CONFIG)
+    child = _agent(model="claude-opus-5-5")
+    child._delegate_depth = 1
+    kwargs = chat_completion_helpers._build_anthropic_kwargs(
+        child, [{"role": "user", "content": "compare the competitors' prices"}], [LOOKUP], None, {})
+    assert advisor.advisor_in(kwargs) is None
+    assert advisor.ADVISOR_BETA not in betas(kwargs)
+
+
+def test_the_advisor_usage_a_stream_reported_is_carried_onto_the_final_message():
+    iterations = [{"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 3060, "output_tokens": 751}]
+    final = SimpleNamespace(usage=SimpleNamespace(input_tokens=10, output_tokens=5))
+    advisor.carry_iterations(final, {"usage": {"input_tokens": 10, "output_tokens": 5, "iterations": iterations}})
+    assert final.usage.iterations == iterations
+
+
+def test_a_stream_without_advisor_usage_leaves_the_final_message_as_it_is():
+    final = SimpleNamespace(usage=SimpleNamespace(input_tokens=10, output_tokens=5))
+    advisor.carry_iterations(final, {"usage": {"input_tokens": 10, "output_tokens": 5}})
+    assert not hasattr(final.usage, "iterations")
+
+
+NUDGED = {"advisor": {**CONFIG["advisor"], "nudge_turn": 2}}
+ASK = {"role": "user", "content": "how many new orders?"}
+CALL_LOOKUP = {"role": "assistant", "content": [THOUGHT, {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}]}
+LOOKED_UP = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "6"}]}
+CONSULTED = {"role": "assistant", "content": [THOUGHT, CONSULT, ADVICE,
+                                               {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}]}
+
+
+def nudged(messages, model=EXECUTOR, config=NUDGED):
+    kwargs = {"model": model, "messages": [dict(m) for m in messages], "tools": []}
+    advisor.apply_advisor(kwargs, model=model, base_url=NATIVE, is_oauth=False, tool=advisor.advisor_tool(config),
+                          nudge_turn=advisor.nudge_turn(config))
+    return kwargs["messages"]
+
+
+def test_a_haiku_that_has_not_consulted_by_its_second_turn_is_nudged_with_anthropic_s_wording():
+    sent = nudged([ASK, CALL_LOOKUP, LOOKED_UP])
+    assert sent[-1] == {"role": "user", "content": advisor.NUDGE_TEXT}
+    assert sent[:-1] == [ASK, CALL_LOOKUP, LOOKED_UP]
+
+
+@pytest.mark.parametrize("messages", [[ASK], [ASK, CONSULTED, LOOKED_UP],
+                                      [ASK, CALL_LOOKUP, LOOKED_UP, CALL_LOOKUP, LOOKED_UP]])
+def test_no_nudge_on_the_first_turn_after_a_consultation_or_past_the_nudge_turn(messages):
+    assert nudged(messages) == messages
+
+
+def test_each_new_question_counts_its_own_turns():
+    earlier = [ASK, CALL_LOOKUP, LOOKED_UP, {"role": "assistant", "content": [{"type": "text", "text": "6"}]}]
+    sent = nudged(earlier + [ASK, CALL_LOOKUP, LOOKED_UP])
+    assert sent[-1]["content"] == advisor.NUDGE_TEXT
+
+
+@pytest.mark.parametrize("model,config", [("claude-sonnet-5-5", NUDGED), (EXECUTOR, CONFIG)])
+def test_no_nudge_for_an_executor_that_is_not_haiku_or_when_the_nudge_is_off(model, config):
+    messages = [ASK, CALL_LOOKUP, LOOKED_UP]
+    assert nudged(messages, model=model, config=config) == messages
+
+
+def test_the_advisor_usage_is_read_off_the_stream_s_message_delta_event():
+    from anthropic.types import MessageDeltaUsage, RawMessageDeltaEvent
+
+    iterations = [{"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 3060, "output_tokens": 751}]
+    usage = MessageDeltaUsage.construct(output_tokens=5, iterations=iterations)
+    event = RawMessageDeltaEvent.construct(type="message_delta", delta={"stop_reason": "end_turn"}, usage=usage)
+    assert advisor.iterations_of(event) == iterations
+
+
+def test_an_event_without_advisor_usage_yields_none():
+    event = SimpleNamespace(type="message_delta", usage=SimpleNamespace(output_tokens=5))
+    assert advisor.iterations_of(event) is None
+    assert advisor.iterations_of(SimpleNamespace(type="ping")) is None
+
+
+def test_an_advisor_call_that_failed_is_logged_with_its_error_code(caplog):
+    failed = {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1",
+              "content": {"type": "advisor_tool_result_error", "error_code": "too_many_requests"}}
+    with caplog.at_level(logging.INFO, logger=advisor.logger.name):
+        advisor.log_advisor_usage(message([CONSULT, failed, {"type": "text", "text": "ok"}], "end_turn"))
+    assert "Advisor failed: too_many_requests" in caplog.text
+
+
+def test_an_advisor_call_logged_off_the_session_s_thread_carries_that_session_s_tag(caplog):
+    import threading
+
+    import hermes_logging
+
+    reply = message([], "end_turn", [{"type": "advisor_message", "model": "claude-sonnet-5-5", "input_tokens": 60000,
+                                      "output_tokens": 1600}])
+    seen = {}
+
+    def worker():
+        with caplog.at_level(logging.INFO, logger=advisor.logger.name):
+            advisor.log_advisor_usage(reply, session_id="20261019_173252_aa0ee4e1")
+        seen["after"] = getattr(hermes_logging._session_context, "session_id", None)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+    logged = [r for r in caplog.records if "Advisor call" in r.getMessage()]
+    assert [r.session_tag for r in logged] == [" [20261019_173252_aa0ee4e1]"]
+    assert seen["after"] is None
+
+
+ADVISED = [
+    {"type": "message", "input_tokens": 1224, "output_tokens": 499},
+    {"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 3060, "output_tokens": 751,
+     "cache_read_input_tokens": 2000, "cache_creation_input_tokens": 900},
+]
+
+
+def _accounted(db, session_id="20261019_173252_aa0ee4e1"):
+    return SimpleNamespace(log_prefix="", session_id=session_id, _session_db=db, _anthropic_base_url=NATIVE)
+
+
+def test_each_advisor_call_lands_in_the_session_s_usage_on_the_advisor_s_model_priced_at_its_rates(tmp_path):
+    from hermes_state import SessionDB
+
+    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+
+    db = SessionDB(tmp_path / "state.db")
+    agent = _accounted(db)
+    db.create_session(agent.session_id, source="slack")
+    advisor.account_advisor_usage(message([ADVICE], "end_turn", ADVISED), agent)
+    rows = [dict(r) for r in db._conn.execute(
+        "SELECT model, task, api_call_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
+        " estimated_cost_usd FROM session_model_usage WHERE session_id = ?", (agent.session_id,)).fetchall()]
+    spent = ADVISED[1]
+    expected = estimate_usage_cost(spent["model"], CanonicalUsage(
+        input_tokens=spent["input_tokens"], output_tokens=spent["output_tokens"],
+        cache_read_tokens=spent["cache_read_input_tokens"], cache_write_tokens=spent["cache_creation_input_tokens"]),
+        provider="anthropic", base_url=NATIVE).amount_usd
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["model"], row["task"], row["api_call_count"]) == (spent["model"], advisor.ADVISOR_TASK, 1)
+    assert (row["input_tokens"], row["output_tokens"], row["cache_read_tokens"], row["cache_write_tokens"]) == (
+        spent["input_tokens"], spent["output_tokens"], spent["cache_read_input_tokens"],
+        spent["cache_creation_input_tokens"])
+    assert row["estimated_cost_usd"] == pytest.approx(float(expected)) and row["estimated_cost_usd"] > 0
+
+
+def test_a_reply_that_consulted_no_advisor_records_nothing(tmp_path):
+    db = MagicMock()
+    advisor.account_advisor_usage(message([], "end_turn", ADVISED[:1]), _accounted(db))
+    db.record_auxiliary_usage.assert_not_called()
+
+
+@pytest.mark.parametrize("db", [None, MagicMock(record_auxiliary_usage=MagicMock(side_effect=RuntimeError("locked")))])
+def test_redteam_accounting_that_cannot_record_never_breaks_the_turn(db, caplog):
+    with caplog.at_level(logging.INFO, logger=advisor.logger.name):
+        advisor.account_advisor_usage(message([ADVICE], "end_turn", ADVISED), _accounted(db))
+    assert "Advisor call: model=claude-opus-5-5" in caplog.text
+
+
+def test_a_resumed_part_of_a_paused_turn_is_accounted_like_the_first(tmp_path):
+    from agent.chat_completion_helpers import _StreamingCall
+
+    db = MagicMock()
+    resumed = message([ADVICE], "end_turn", ADVISED)
+    call = SimpleNamespace(api_kwargs={"messages": []}, agent=_accounted(db),
+                           _call_anthropic=lambda client: resumed)
+    assert _StreamingCall._resume_paused_anthropic(call, object(), {"messages": [{"role": "user"}]}) is resumed
+    assert call.api_kwargs == {"messages": []}
+    db.record_auxiliary_usage.assert_called_once()
+    assert db.record_auxiliary_usage.call_args.args[1] == advisor.ADVISOR_TASK

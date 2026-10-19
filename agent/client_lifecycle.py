@@ -1035,11 +1035,18 @@ class ClientLifecycleMixin:
         # Strips Responses-only kwargs that leak in under an api_mode-flip race.
         from agent.anthropic_adapter import create_anthropic_message
         # on_response: rate-limit + credits state live in response headers, which the parsed Message drops.
-        return create_anthropic_message(
-            client or self._anthropic_client, api_kwargs, log_prefix=getattr(self, "log_prefix", ""),
-            prefer_stream=not bool(getattr(self, "_disable_streaming", False)),
-            on_response=self._capture_anthropic_response_headers,
-        )
+        # Lara fork: a turn the advisor paused is resent until it ends (agent/anthropic_advisor.py).
+        from agent.anthropic_advisor import account_advisor_usage, resume_paused
+
+        def send(kwargs):
+            reply = create_anthropic_message(
+                client or self._anthropic_client, kwargs, log_prefix=getattr(self, "log_prefix", ""),
+                prefer_stream=not bool(getattr(self, "_disable_streaming", False)),
+                on_response=self._capture_anthropic_response_headers,
+            )
+            account_advisor_usage(reply, self)
+            return reply
+        return resume_paused(send, api_kwargs, send(api_kwargs))
 
     def _rebuild_anthropic_client(self) -> None:
         """Rebuild the Anthropic client after an interrupt/stale call (Bedrock SDK for bedrock; honors 1M-beta flag)."""
