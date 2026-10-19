@@ -1036,7 +1036,7 @@ class ClientLifecycleMixin:
         from agent.anthropic_adapter import create_anthropic_message
         # on_response: rate-limit + credits state live in response headers, which the parsed Message drops.
         # Lara fork: a turn the advisor paused is resent until it ends (agent/anthropic_advisor.py).
-        from agent.anthropic_advisor import log_advisor_usage, resume_paused
+        from agent.anthropic_advisor import account_advisor_usage, resume_paused
 
         def send(kwargs):
             reply = create_anthropic_message(
@@ -1044,7 +1044,7 @@ class ClientLifecycleMixin:
                 prefer_stream=not bool(getattr(self, "_disable_streaming", False)),
                 on_response=self._capture_anthropic_response_headers,
             )
-            log_advisor_usage(reply, getattr(self, "log_prefix", ""), getattr(self, "session_id", None))
+            account_advisor_usage(reply, self)
             return reply
         return resume_paused(send, api_kwargs, send(api_kwargs))
 

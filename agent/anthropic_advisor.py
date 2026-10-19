@@ -5,7 +5,8 @@ The executor model consults a stronger advisor model inside the same Messages re
 The advisor's result is opaque (encrypted for newer advisors) and replays verbatim in its place,
 because the thinking blocks after it are signed against it. A request can end with ``pause_turn``
 while the advisor is still working; it is resent with the partial reply until the advisor answers.
-The advisor's tokens are not in the request's top-level usage, so they are logged on their own line.
+The advisor's tokens are not in the request's top-level usage, so each advisor call is logged on its own line
+and recorded as its own row of the session's usage, on the advisor's model under the ``advisor`` task.
 """
 
 import contextlib
@@ -26,6 +27,8 @@ DEFAULT_RESUMES = 1
 NUDGE_TEXT = ("You have not consulted the advisor yet. If the task has a non-obvious design decision or a failure mode "
               "you haven't ruled out, call advisor now before committing to an approach.")
 NUDGED_FAMILY = "haiku"
+ADVISOR_TASK = "advisor"
+ADVISOR_PROVIDER = "anthropic"
 
 
 def advisor_tool(config: Optional[dict]) -> Optional[dict[str, Any]]:
@@ -139,9 +142,31 @@ def _logged_as(session_id: Optional[str]) -> Iterator[None]:
         hermes_logging.set_session_context(previous)
 
 
+def account_advisor_usage(reply: Any, agent: Any) -> None:
+    """Log each advisor call the reply carries and record it in the agent's session usage."""
+    session_id = getattr(agent, "session_id", None)
+    log_advisor_usage(reply, getattr(agent, "log_prefix", ""), session_id)
+    _record_advisor_usage(reply, getattr(agent, "_session_db", None), session_id,
+                          getattr(agent, "_anthropic_base_url", None))
+
+
 def log_advisor_usage(reply: Any, log_prefix: str = "", session_id: Optional[str] = None) -> None:
     with _logged_as(session_id):
         _log_advisor_usage(reply, log_prefix)
+
+
+def _advisor_calls(reply: Any) -> list[dict]:
+    usage = getattr(reply, "usage", None)
+    calls = []
+    for iteration in getattr(usage, "iterations", None) or []:
+        data = iteration if isinstance(iteration, dict) else getattr(iteration, "__dict__", {})
+        if data.get("type") == ADVISOR_ITERATION:
+            calls.append({"model": str(data.get("model") or "unknown"),
+                          "input_tokens": int(data.get("input_tokens") or 0),
+                          "output_tokens": int(data.get("output_tokens") or 0),
+                          "cache_read_tokens": int(data.get("cache_read_input_tokens") or 0),
+                          "cache_write_tokens": int(data.get("cache_creation_input_tokens") or 0)})
+    return calls
 
 
 def _log_advisor_usage(reply: Any, log_prefix: str) -> None:
@@ -149,14 +174,26 @@ def _log_advisor_usage(reply: Any, log_prefix: str) -> None:
         content = getattr(block, "content", None)
         if getattr(block, "type", None) == "advisor_tool_result" and _field(content, "type") == "advisor_tool_result_error":
             logger.warning("%sAdvisor failed: %s", log_prefix, _field(content, "error_code") or "unknown")
-    usage = getattr(reply, "usage", None)
-    for iteration in getattr(usage, "iterations", None) or []:
-        data = iteration if isinstance(iteration, dict) else getattr(iteration, "__dict__", {})
-        if data.get("type") == ADVISOR_ITERATION:
-            logger.info("%sAdvisor call: model=%s in=%d out=%d cache=%d write=%d", log_prefix,
-                        data.get("model", "unknown"), int(data.get("input_tokens") or 0),
-                        int(data.get("output_tokens") or 0), int(data.get("cache_read_input_tokens") or 0),
-                        int(data.get("cache_creation_input_tokens") or 0))
+    for call in _advisor_calls(reply):
+        logger.info("%sAdvisor call: model=%s in=%d out=%d cache=%d write=%d", log_prefix, call["model"],
+                    call["input_tokens"], call["output_tokens"], call["cache_read_tokens"], call["cache_write_tokens"])
+
+
+def _record_advisor_usage(reply: Any, session_db: Any, session_id: Optional[str], base_url: Optional[str]) -> None:
+    """Best-effort, like every auxiliary accounting: a failed write never breaks the turn."""
+    if session_db is None or not session_id:
+        return
+    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+    for call in _advisor_calls(reply):
+        try:
+            tokens = {k: v for k, v in call.items() if k != "model"}
+            cost = estimate_usage_cost(call["model"], CanonicalUsage(**tokens), provider=ADVISOR_PROVIDER,
+                                       base_url=base_url).amount_usd
+            session_db.record_auxiliary_usage(
+                session_id, ADVISOR_TASK, model=call["model"], billing_provider=ADVISOR_PROVIDER,
+                billing_base_url=base_url, estimated_cost_usd=None if cost is None else float(cost), **tokens)
+        except Exception:
+            logger.debug("Advisor usage recording failed (non-fatal)", exc_info=True)
 
 
 def carry_iterations(final: Any, accumulated: dict) -> None:

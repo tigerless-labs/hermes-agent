@@ -268,3 +268,66 @@ def test_an_advisor_call_logged_off_the_session_s_thread_carries_that_session_s_
     logged = [r for r in caplog.records if "Advisor call" in r.getMessage()]
     assert [r.session_tag for r in logged] == [" [20261019_173252_aa0ee4e1]"]
     assert seen["after"] is None
+
+
+ADVISED = [
+    {"type": "message", "input_tokens": 1224, "output_tokens": 499},
+    {"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 3060, "output_tokens": 751,
+     "cache_read_input_tokens": 2000, "cache_creation_input_tokens": 900},
+]
+
+
+def _accounted(db, session_id="20261019_173252_aa0ee4e1"):
+    return SimpleNamespace(log_prefix="", session_id=session_id, _session_db=db, _anthropic_base_url=NATIVE)
+
+
+def test_each_advisor_call_lands_in_the_session_s_usage_on_the_advisor_s_model_priced_at_its_rates(tmp_path):
+    from hermes_state import SessionDB
+
+    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+
+    db = SessionDB(tmp_path / "state.db")
+    agent = _accounted(db)
+    db.create_session(agent.session_id, source="slack")
+    advisor.account_advisor_usage(message([ADVICE], "end_turn", ADVISED), agent)
+    rows = [dict(r) for r in db._conn.execute(
+        "SELECT model, task, api_call_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
+        " estimated_cost_usd FROM session_model_usage WHERE session_id = ?", (agent.session_id,)).fetchall()]
+    spent = ADVISED[1]
+    expected = estimate_usage_cost(spent["model"], CanonicalUsage(
+        input_tokens=spent["input_tokens"], output_tokens=spent["output_tokens"],
+        cache_read_tokens=spent["cache_read_input_tokens"], cache_write_tokens=spent["cache_creation_input_tokens"]),
+        provider="anthropic", base_url=NATIVE).amount_usd
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["model"], row["task"], row["api_call_count"]) == (spent["model"], advisor.ADVISOR_TASK, 1)
+    assert (row["input_tokens"], row["output_tokens"], row["cache_read_tokens"], row["cache_write_tokens"]) == (
+        spent["input_tokens"], spent["output_tokens"], spent["cache_read_input_tokens"],
+        spent["cache_creation_input_tokens"])
+    assert row["estimated_cost_usd"] == pytest.approx(float(expected)) and row["estimated_cost_usd"] > 0
+
+
+def test_a_reply_that_consulted_no_advisor_records_nothing(tmp_path):
+    db = MagicMock()
+    advisor.account_advisor_usage(message([], "end_turn", ADVISED[:1]), _accounted(db))
+    db.record_auxiliary_usage.assert_not_called()
+
+
+@pytest.mark.parametrize("db", [None, MagicMock(record_auxiliary_usage=MagicMock(side_effect=RuntimeError("locked")))])
+def test_redteam_accounting_that_cannot_record_never_breaks_the_turn(db, caplog):
+    with caplog.at_level(logging.INFO, logger=advisor.logger.name):
+        advisor.account_advisor_usage(message([ADVICE], "end_turn", ADVISED), _accounted(db))
+    assert "Advisor call: model=claude-opus-5-5" in caplog.text
+
+
+def test_a_resumed_part_of_a_paused_turn_is_accounted_like_the_first(tmp_path):
+    from agent.chat_completion_helpers import _StreamingCall
+
+    db = MagicMock()
+    resumed = message([ADVICE], "end_turn", ADVISED)
+    call = SimpleNamespace(api_kwargs={"messages": []}, agent=_accounted(db),
+                           _call_anthropic=lambda client: resumed)
+    assert _StreamingCall._resume_paused_anthropic(call, object(), {"messages": [{"role": "user"}]}) is resumed
+    assert call.api_kwargs == {"messages": []}
+    db.record_auxiliary_usage.assert_called_once()
+    assert db.record_auxiliary_usage.call_args.args[1] == advisor.ADVISOR_TASK
