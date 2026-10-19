@@ -103,3 +103,11 @@ def log_advisor_usage(reply: Any, log_prefix: str = "") -> None:
                         data.get("model", "unknown"), int(data.get("input_tokens") or 0),
                         int(data.get("output_tokens") or 0), int(data.get("cache_read_input_tokens") or 0),
                         int(data.get("cache_creation_input_tokens") or 0))
+
+
+def carry_iterations(final: Any, accumulated: dict) -> None:
+    """Copy the stream's ``usage.iterations`` onto the SDK's final message, which drops it."""
+    iterations = ((accumulated or {}).get("usage") or {}).get("iterations")
+    usage = getattr(final, "usage", None)
+    if iterations and usage is not None and not getattr(usage, "iterations", None):
+        setattr(usage, "iterations", iterations)

@@ -160,3 +160,16 @@ def test_the_main_conversation_carries_the_advisor_only_when_one_is_configured(m
     kwargs = chat_completion_helpers._build_anthropic_kwargs(
         _agent(), [{"role": "user", "content": "how many new orders?"}], [LOOKUP], None, {})
     assert (advisor.advisor_in(kwargs) is not None) is expected
+
+
+def test_the_advisor_usage_a_stream_reported_is_carried_onto_the_final_message():
+    iterations = [{"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 3060, "output_tokens": 751}]
+    final = SimpleNamespace(usage=SimpleNamespace(input_tokens=10, output_tokens=5))
+    advisor.carry_iterations(final, {"usage": {"input_tokens": 10, "output_tokens": 5, "iterations": iterations}})
+    assert final.usage.iterations == iterations
+
+
+def test_a_stream_without_advisor_usage_leaves_the_final_message_as_it_is():
+    final = SimpleNamespace(usage=SimpleNamespace(input_tokens=10, output_tokens=5))
+    advisor.carry_iterations(final, {"usage": {"input_tokens": 10, "output_tokens": 5}})
+    assert not hasattr(final.usage, "iterations")

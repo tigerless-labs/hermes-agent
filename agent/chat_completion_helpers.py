@@ -3479,6 +3479,9 @@ class _StreamingCall(StreamingWaitMonitor):
                 _stop_details = accumulator.finalize().get("stop_details")
                 if _stop_details is not None and getattr(base_final_message, "stop_details", None) is None:
                     base_final_message.stop_details = _stop_details
+                # Lara fork: likewise the advisor's usage.iterations (agent/anthropic_advisor.py).
+                from agent.anthropic_advisor import carry_iterations
+                carry_iterations(base_final_message, accumulator.finalize())
         finally:
             try:
                 self._close_managed_stream()
