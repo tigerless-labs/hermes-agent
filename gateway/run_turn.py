@@ -29,6 +29,7 @@ from gateway.response_filters import (
     display_kind_for_event, is_machinery_display_kind, reply_expected_metadata, silence_allowed,
 )
 from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted
+from gateway.interim_scope import group_chat_metadata
 from gateway.session import (
     SessionSource, _session_key_namespace, build_channel_continuity_note,
     build_session_context,
@@ -2206,7 +2207,8 @@ class GatewayTurnMixin:
                 reply_expected=event.reply_expected,
                 persist_user_display_metadata={
                     "gateway_input_owner": prepared.persistence_owner,
-                    **reply_expected_metadata(event.reply_expected), **diagnostic_metadata(event)},
+                    **reply_expected_metadata(event.reply_expected), **diagnostic_metadata(event),
+                    **group_chat_metadata(event)},
                 message_type=event.message_type,
                 scheduled_heartbeat=bool(getattr(event, "_heartbeat_session_id", None)),
             )
@@ -2932,6 +2934,18 @@ class GatewayTurnMixin:
         when multiplexing is off)."""
         with self._profile_scope_for_source(source):
             return await self._run_agent_inner(message, context_prompt, history, source, session_id, **turn_kwargs)
+
+    def _run_agent_interim_scope(
+        self, disp: GatewayRunner._RunAgentDisplay, display_metadata: Optional[dict],
+    ) -> GatewayRunner._RunAgentDisplay:
+        """``display.interim_assistant_messages_one_to_one_only``: interim messages only for a turn whose
+        opening message says the conversation is one-to-one (gateway/interim_scope.py)."""
+        from gateway.interim_scope import interim_allowed
+        one_to_one_only = disp.resolve_display_setting(
+            disp.user_config, disp.platform_key, "interim_assistant_messages_one_to_one_only", False) is True
+        if interim_allowed(display_metadata, one_to_one_only):
+            return disp
+        return dataclasses.replace(disp, interim_assistant_messages_enabled=False)
 
     def _run_agent_display_settings(self, source: SessionSource) -> GatewayRunner._RunAgentDisplay:
         """Resolve per-platform display, progress, status and streaming-surface settings for a turn."""
@@ -3971,7 +3985,8 @@ class GatewayTurnMixin:
                 persist_user_display_kind=next_display_kind,
                 reply_expected=next_reply_expected,
                 persist_user_display_metadata={
-                    **reply_expected_metadata(next_reply_expected), **diagnostic_metadata(pending_event)} or None,
+                    **reply_expected_metadata(next_reply_expected), **diagnostic_metadata(pending_event),
+                    **group_chat_metadata(pending_event)} or None,
             )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(
@@ -4313,7 +4328,8 @@ class GatewayTurnMixin:
 
         from run_agent import AIAgent
 
-        disp = self._run_agent_display_settings(source)
+        disp = self._run_agent_interim_scope(
+            self._run_agent_display_settings(source), persist_user_display_metadata)
         if scheduled_heartbeat:
             # A heartbeat is proactive work: tool chrome, drafts, thinking and periodic
             # liveness notices would create a user-visible ping before its final result is known.
