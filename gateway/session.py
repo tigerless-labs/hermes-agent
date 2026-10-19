@@ -98,6 +98,9 @@ class SessionSource:
     # over the authenticated relay WebSocket. ``platform`` is the UNDERLYING platform, not
     # ``relay``, so authz must key upstream trust off THIS flag.
     delivered_via_upstream_relay: bool = False
+    # Wire-invisible: the adapter's verdict that this conversation is a group chat (Slack ``group_chat_flag``);
+    # None when the adapter gave none. Bound per turn as HERMES_SESSION_GROUP_CHAT.
+    group_chat: Optional[bool] = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         # Mirror scope_id/guild_id onto each other (scope_id wins) so readers of EITHER agree.

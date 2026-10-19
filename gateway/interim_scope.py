@@ -1,24 +1,21 @@
 """Interim assistant messages only in one-to-one conversations
-(``display.interim_assistant_messages_one_to_one_only``).
+(``display.interim_assistant_messages_one_to_one_only``), and the group-chat verdict as a session value.
 
-The adapter's verdict on whether a conversation is a group chat rides on the message event
-(``metadata["slack_group_chat"]``). It reaches the turn through the persisted user row's display
-metadata, so a first turn and a turn taken from the queue each carry their own message's verdict.
-Only a plain ``False`` counts as one-to-one.
+The adapter's verdict rides on the message's source (``SessionSource.group_chat``). A turn sends
+interim messages only when that verdict is a plain ``False``; a group chat, or no verdict, sends none.
+The same verdict is bound per turn as ``HERMES_SESSION_GROUP_CHAT``: ``"1"`` group chat, ``"0"``
+one-to-one, ``""`` unknown.
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional
-
-GROUP_CHAT_KEY = "group_chat"
-EVENT_VERDICT_KEY = "slack_group_chat"
+from typing import Any
 
 
-def group_chat_metadata(event: Any) -> dict:
-    verdict = (getattr(event, "metadata", None) or {}).get(EVENT_VERDICT_KEY)
-    return {GROUP_CHAT_KEY: verdict} if isinstance(verdict, bool) else {}
+def interim_allowed(source: Any, one_to_one_only: bool) -> bool:
+    return not one_to_one_only or getattr(source, "group_chat", None) is False
 
 
-def interim_allowed(display_metadata: Optional[dict], one_to_one_only: bool) -> bool:
-    return not one_to_one_only or (display_metadata or {}).get(GROUP_CHAT_KEY) is False
+def group_chat_value(source: Any) -> str:
+    verdict = getattr(source, "group_chat", None)
+    return {True: "1", False: "0"}.get(verdict, "") if isinstance(verdict, bool) else ""

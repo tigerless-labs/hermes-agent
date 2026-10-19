@@ -1,5 +1,5 @@
 """``platforms.slack.extra.group_chat_flag``: each admitted message carries the adapter's verdict on
-whether its conversation is a group chat, as ``metadata["slack_group_chat"]``, for plugins to tell the
+whether its conversation is a group chat, as ``source.group_chat``, for plugins to tell the
 model. A 1:1 DM never is; a group DM always is. In a channel thread it is when someone besides the
 sender and the bot has spoken in or been @mentioned in the thread (other bots do not count), the same
 people ``thread_reply_judgement`` counts; a top-level message counts only whom it @mentions; a thread
@@ -49,7 +49,7 @@ async def _verdict(adapter, event):
             patch.object(adapter, "_has_active_session_for_thread", return_value=True):
         await adapter._handle_slack_message(event)
     sent = adapter.handle_message.await_args.args[0]
-    return sent.metadata.get("slack_group_chat", "absent")
+    return "absent" if sent.source.group_chat is None else sent.source.group_chat
 
 
 @pytest.mark.asyncio
