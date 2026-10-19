@@ -752,6 +752,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # in the rendered index (pure string check — inherits the index's stability).
     if "skill_view" in (agent.valid_tool_names or set()) and "- hermes-agent:" in skills_prompt:
         stable_parts[_help_guidance_slot] = HERMES_AGENT_HELP_GUIDANCE
+    if not getattr(agent, "_hermes_help_guidance", True):
+        stable_parts[_help_guidance_slot] = None
     stable_parts.extend(_alibaba_identity_part(agent))
     # Pinned skills are per-agent constants (resolved once), so they live in the stable prefix.
     stable_parts.extend(_auto_load_parts(agent))
