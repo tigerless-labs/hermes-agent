@@ -348,6 +348,23 @@ _ANTHROPIC_FAST_MODE_PRICING: dict[str, PricingEntry] = {
     )
     for _model in _models
 }
+# Lara fork: the models Lara runs on, priced with no network. Its engine host cannot reach models.dev
+# or a provider's /models endpoint, so without a bundled row these price as "unknown".
+# Sonnet 5.5 cache hits are 0.05x input; Haiku 5.5 prices the whole request higher once its prompt,
+# cache reads and writes included, passes 100K tokens.
+_OFFICIAL_DOCS_PRICING[("anthropic", "claude-sonnet-5-5")] = _snap(
+    "2.00", "10.00", "0.10", "2.50", url=_ANTHROPIC_URL, version="anthropic-pricing-2026-10",
+)
+_OFFICIAL_DOCS_PRICING[("anthropic", "claude-haiku-5-5")] = _snap(
+    "0.10", "0.50", "0.01", "0.125", url=_ANTHROPIC_URL, version="anthropic-pricing-2026-10",
+    tier_threshold_tokens=100_000, input_cost_per_million_above=Decimal("0.50"),
+    output_cost_per_million_above=Decimal("2.50"), cache_read_cost_per_million_above=Decimal("0.05"),
+    cache_write_cost_per_million_above=Decimal("0.625"),
+)
+# Meta Model API standard tier (prompts not used for training); caching has no write premium.
+_OFFICIAL_DOCS_PRICING[("meta-ai", "muse-spark-1.3")] = _snap(
+    "1.25", "4.25", "0.15", "1.25", url="https://dev.meta.ai/docs/pricing-rate-limits", version="meta-pricing-2026-10",
+)
 del _BEDROCK_URL, _ANTHROPIC_URL, _GOOGLE_URL, _OPUS, _SONNET, _OPUS_5_5
 
 # GPT-5.6 / GPT-6 tier "-pro" high-effort variants bill at the base tier's per-token
