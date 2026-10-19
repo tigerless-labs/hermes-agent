@@ -3403,6 +3403,7 @@ class _StreamingCall(StreamingWaitMonitor):
         self._attempt_request_client = request_client
         _stream_context = {"manager": None, "stream": None}
         base_final_message = None
+        advisor_iterations = None  # Lara fork: see agent/anthropic_advisor.py
         text_watch, thinking_watch = RunawayStreamWatch(), RunawayStreamWatch()
         runaway = None
 
@@ -3443,6 +3444,9 @@ class _StreamingCall(StreamingWaitMonitor):
                     saw_message_stop = True
                 elif event_type == "message_delta":
                     self._mark_finish_seen(_diag, getattr(getattr(event, "delta", None), "stop_reason", None))
+                    # Lara fork: the advisor's usage rides on message_delta; the SDK's final message drops it.
+                    from agent.anthropic_advisor import iterations_of
+                    advisor_iterations = iterations_of(event) or advisor_iterations
                 elif event_type == "content_block_start":
                     block = getattr(event, "content_block", None)
                     if block and getattr(block, "type", None) == "tool_use":
@@ -3482,7 +3486,7 @@ class _StreamingCall(StreamingWaitMonitor):
                     base_final_message.stop_details = _stop_details
                 # Lara fork: likewise the advisor's usage.iterations (agent/anthropic_advisor.py).
                 from agent.anthropic_advisor import carry_iterations
-                carry_iterations(base_final_message, accumulator.finalize())
+                carry_iterations(base_final_message, {"usage": {"iterations": advisor_iterations}})
         finally:
             try:
                 self._close_managed_stream()

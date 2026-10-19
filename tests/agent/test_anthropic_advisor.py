@@ -212,3 +212,26 @@ def test_each_new_question_counts_its_own_turns():
 def test_no_nudge_for_an_executor_that_is_not_haiku_or_when_the_nudge_is_off(model, config):
     messages = [ASK, CALL_LOOKUP, LOOKED_UP]
     assert nudged(messages, model=model, config=config) == messages
+
+
+def test_the_advisor_usage_is_read_off_the_stream_s_message_delta_event():
+    from anthropic.types import MessageDeltaUsage, RawMessageDeltaEvent
+
+    iterations = [{"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 3060, "output_tokens": 751}]
+    usage = MessageDeltaUsage.construct(output_tokens=5, iterations=iterations)
+    event = RawMessageDeltaEvent.construct(type="message_delta", delta={"stop_reason": "end_turn"}, usage=usage)
+    assert advisor.iterations_of(event) == iterations
+
+
+def test_an_event_without_advisor_usage_yields_none():
+    event = SimpleNamespace(type="message_delta", usage=SimpleNamespace(output_tokens=5))
+    assert advisor.iterations_of(event) is None
+    assert advisor.iterations_of(SimpleNamespace(type="ping")) is None
+
+
+def test_an_advisor_call_that_failed_is_logged_with_its_error_code(caplog):
+    failed = {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1",
+              "content": {"type": "advisor_tool_result_error", "error_code": "too_many_requests"}}
+    with caplog.at_level(logging.INFO, logger=advisor.logger.name):
+        advisor.log_advisor_usage(message([CONSULT, failed, {"type": "text", "text": "ok"}], "end_turn"))
+    assert "Advisor failed: too_many_requests" in caplog.text

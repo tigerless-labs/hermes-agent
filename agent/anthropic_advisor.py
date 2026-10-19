@@ -126,6 +126,10 @@ def resume_paused(send: Callable[[dict], Any], kwargs: dict, reply: Any) -> Any:
 
 
 def log_advisor_usage(reply: Any, log_prefix: str = "") -> None:
+    for block in getattr(reply, "content", None) or []:
+        content = getattr(block, "content", None)
+        if getattr(block, "type", None) == "advisor_tool_result" and _field(content, "type") == "advisor_tool_result_error":
+            logger.warning("%sAdvisor failed: %s", log_prefix, _field(content, "error_code") or "unknown")
     usage = getattr(reply, "usage", None)
     for iteration in getattr(usage, "iterations", None) or []:
         data = iteration if isinstance(iteration, dict) else getattr(iteration, "__dict__", {})
@@ -142,3 +146,16 @@ def carry_iterations(final: Any, accumulated: dict) -> None:
     usage = getattr(final, "usage", None)
     if iterations and usage is not None and not getattr(usage, "iterations", None):
         setattr(usage, "iterations", iterations)
+
+
+def iterations_of(event: Any) -> Optional[list]:
+    """``usage.iterations`` carried by a stream event (the advisor's tokens arrive on ``message_delta``)."""
+    usage = getattr(event, "usage", None)
+    iterations = getattr(usage, "iterations", None)
+    if iterations is None:
+        iterations = (getattr(usage, "model_extra", None) or {}).get("iterations")
+    return list(iterations) if iterations else None
+
+
+def _field(value: Any, name: str) -> Any:
+    return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
