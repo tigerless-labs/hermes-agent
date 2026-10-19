@@ -1429,6 +1429,8 @@ def _apply_agent_section(agent, _agent_cfg):
         "environment_probe", "bot_mode_protocol",
     ):
         setattr(agent, f"_{_key}", bool(_agent_section.get(_key, True)))
+    # agent.hermes_help_guidance: false leaves "you run on Hermes, its docs are the reference" out of the prompt.
+    agent._hermes_help_guidance = is_truthy_value(_agent_section.get("hermes_help_guidance"), default=True)
     # Warm the probe (~0.5s of subprocesses) off-thread so the first prompt build finds it cached.
     if agent._environment_probe:
         with suppress(Exception):
