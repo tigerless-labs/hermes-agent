@@ -272,6 +272,9 @@ def _create_local_session(task_id: str, allow_real_profile: bool = True) -> dict
     ``allow_real_profile=False``: the user's cookie jar must not reach an arbitrary
     internal host the model chose.
     """
+    # Lara fork: browser.local_sessions off refuses every local session (tools/browser_local_gate.py).
+    from tools.browser_local_gate import refuse_local_session
+    refuse_local_session(task_id)
     if allow_real_profile:
         cdp_url, err = _real_profile._real_profile_cdp()
         if err:
