@@ -29,6 +29,7 @@ from gateway.response_filters import (
     display_kind_for_event, is_machinery_display_kind, reply_expected_metadata, silence_allowed,
 )
 from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted
+from gateway.interim_scope import interim_allowed
 from gateway.session import (
     SessionSource, _session_key_namespace, build_channel_continuity_note,
     build_session_context,
@@ -3012,7 +3013,11 @@ class GatewayTurnMixin:
         interim_assistant_messages_mode = _display_surface_mode(
             "interim_assistant_messages", default=True, require_platform_override_for={Platform.MATTERMOST},
         )
-        interim_assistant_messages_enabled = not is_webhook and interim_assistant_messages_mode != "off"
+        _interim_one_to_one_only = resolve_display_setting(
+            user_config, platform_key, "interim_assistant_messages_one_to_one_only", False) is True
+        interim_assistant_messages_enabled = (
+            not is_webhook and interim_assistant_messages_mode != "off"
+            and interim_allowed(source, _interim_one_to_one_only))
         _thinking_enabled = _display_surface_mode(
             "thinking_progress", default=False, require_platform_override_for={Platform.MATTERMOST},
         ) != "off"

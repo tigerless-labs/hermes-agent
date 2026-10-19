@@ -4918,7 +4918,7 @@ class SlackAdapter(BasePlatformAdapter):
                 thread_ts=event_thread_ts, team_id=team_id, user_id=user_id, text=routing_text,
                 bot_uid=bot_uid))
         if self._slack_group_chat_flag():
-            msg_event.metadata["slack_group_chat"] = await self._is_group_chat(
+            msg_event.source.group_chat = await self._is_group_chat(
                 is_one_to_one_dm=is_one_to_one_dm, is_dm=is_dm, channel_id=channel_id, team_id=team_id,
                 user_id=user_id, routing_text=routing_text, bot_uid=bot_uid,
                 event_thread_ts=event_thread_ts if is_thread_reply else None)
@@ -6794,7 +6794,7 @@ class SlackAdapter(BasePlatformAdapter):
     # thread_context_unseen_only: a thread backfill carries only human messages its session has not seen.
     _slack_thread_context_unseen_only = _extra_or_env_flag_getter(
         "thread_context_unseen_only", "SLACK_THREAD_CONTEXT_UNSEEN_ONLY")
-    # group_chat_flag: each admitted message carries metadata["slack_group_chat"], the adapter's verdict.
+    # group_chat_flag: each admitted message's source carries group_chat, the adapter's verdict.
     _slack_group_chat_flag = _extra_or_env_flag_getter("group_chat_flag", "SLACK_GROUP_CHAT_FLAG")
     # inbound_markdown: the Slack text the agent reads arrives as Markdown, the inverse of format_message.
     _slack_inbound_markdown = _extra_or_env_flag_getter("inbound_markdown", "SLACK_INBOUND_MARKDOWN")
