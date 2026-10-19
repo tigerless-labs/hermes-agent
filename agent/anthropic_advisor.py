@@ -48,12 +48,12 @@ def nudge_turn(config: Optional[dict]) -> int:
 
 
 def apply_advisor(kwargs: dict, *, model: str, base_url: Optional[str], is_oauth: bool, tool: Optional[dict],
-                  nudge_turn: int = 0) -> None:
+                  nudge_turn: int = 0, delegated: bool = False) -> None:
     """Add the advisor tool and its beta to built Messages kwargs, in place; nudge an under-calling Haiku."""
     from agent.anthropic_adapter import (
         _beta_header, _common_betas_for_base_url, _is_claude_model, _is_third_party_anthropic_endpoint,
     )
-    if not tool or is_oauth or "tools" not in kwargs:
+    if not tool or is_oauth or delegated or "tools" not in kwargs:
         return
     if _is_third_party_anthropic_endpoint(base_url) or not _is_claude_model(model):
         return

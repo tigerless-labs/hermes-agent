@@ -162,6 +162,17 @@ def test_the_main_conversation_carries_the_advisor_only_when_one_is_configured(m
     assert (advisor.advisor_in(kwargs) is not None) is expected
 
 
+def test_redteam_a_delegated_child_carries_no_advisor_whatever_model_it_runs_on(monkeypatch):
+    from agent import chat_completion_helpers
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: CONFIG)
+    child = _agent(model="claude-opus-5-5")
+    child._delegate_depth = 1
+    kwargs = chat_completion_helpers._build_anthropic_kwargs(
+        child, [{"role": "user", "content": "compare the competitors' prices"}], [LOOKUP], None, {})
+    assert advisor.advisor_in(kwargs) is None
+    assert advisor.ADVISOR_BETA not in betas(kwargs)
+
+
 def test_the_advisor_usage_a_stream_reported_is_carried_onto_the_final_message():
     iterations = [{"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 3060, "output_tokens": 751}]
     final = SimpleNamespace(usage=SimpleNamespace(input_tokens=10, output_tokens=5))
