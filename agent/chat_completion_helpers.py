@@ -1388,6 +1388,11 @@ def _build_anthropic_kwargs(agent, api_messages, tools_for_api, reasoning_config
         base_url=getattr(agent, "_anthropic_base_url", None),
         fast_mode=request_overrides.get("speed") == "fast",
         drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)))
+    # Lara fork: the configured advisor rides on the main conversation (agent/anthropic_advisor.py).
+    from agent.anthropic_advisor import advisor_tool, apply_advisor
+    from hermes_cli.config import load_config_readonly
+    apply_advisor(anthropic_kwargs, model=agent.model, base_url=getattr(agent, "_anthropic_base_url", None),
+                  is_oauth=bool(agent._is_anthropic_oauth), tool=advisor_tool(load_config_readonly()))
     # Portal reads ``tags`` / ``session_id`` on its Messages route too, but the profile hook
     # is only consulted by the OpenAI-wire transport — merge here to keep sticky routing.
     return _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs)
@@ -3738,7 +3743,21 @@ class _StreamingCall(StreamingWaitMonitor):
         # Per-request client so the watchdog aborts its socket, not the shared one.
         request_client = self.clients.set_client(
             self.agent._create_request_anthropic_client(reason="anthropic_stream_request"), kind="anthropic_messages")
-        return self._call_anthropic(request_client)
+        # Lara fork: a turn the advisor paused is resent until it ends (agent/anthropic_advisor.py).
+        from agent.anthropic_advisor import log_advisor_usage, resume_paused
+        reply = self._call_anthropic(request_client)
+        log_advisor_usage(reply, getattr(self.agent, "log_prefix", ""))
+        return resume_paused(lambda kwargs: self._resume_paused_anthropic(request_client, kwargs), self.api_kwargs, reply)
+
+    def _resume_paused_anthropic(self, request_client, kwargs):
+        from agent.anthropic_advisor import log_advisor_usage
+        original, self.api_kwargs = self.api_kwargs, kwargs
+        try:
+            reply = self._call_anthropic(request_client)
+        finally:
+            self.api_kwargs = original
+        log_advisor_usage(reply, getattr(self.agent, "log_prefix", ""))
+        return reply
 
     def _call(self):
         _max_stream_retries = env_int("HERMES_STREAM_RETRIES", 2)

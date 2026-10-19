@@ -10,6 +10,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent import anthropic_advisor as _advisor
 from agent.image_eviction_policy import outbound_image_retire_count
 from agent.anthropic_thinking_policy import anthropic_thinking_route, route_replays_prior_thinking
 
@@ -312,6 +313,9 @@ _REPLAY_SANITIZERS = {
     "text": _replay_text, "thinking": _replay_thinking, "redacted_thinking": _replay_redacted_thinking,
     "tool_use": _replay_tool_use, "image": _replay_image,
 }
+# Lara fork: the advisor's blocks replay verbatim in their place (agent/anthropic_advisor.py).
+_REPLAY_SANITIZERS.update({"server_tool_use": _advisor.replay_server_tool_use,
+                           "advisor_tool_result": _advisor.replay_advisor_tool_result})
 
 
 def _sanitize_replay_block(b: dict[str, Any]) -> Optional[dict[str, Any]]:
