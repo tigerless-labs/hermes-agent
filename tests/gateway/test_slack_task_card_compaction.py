@@ -17,6 +17,8 @@ TITLE = "Compacting context"
 PREFLIGHT = PREFLIGHT_COMPRESSION_STATUS_TEMPLATE.format(tokens=535355, threshold=500000)
 ONE_COMPACTION = [("lifecycle", PREFLIGHT), ("lifecycle", COMPACTION_STATUS),
                   ("lifecycle", COMPACTION_HEARTBEAT_STATUS), ("compacted", COMPACTION_DONE_STATUS)]
+REFUSED = ("warn", "⚠️ Compression refused: the generated summary would have GROWN the conversation instead of "
+                   "shrinking it. No messages were dropped — conversation continues unchanged.")
 
 
 def _adapter(title=TITLE):
@@ -79,11 +81,22 @@ def test_each_compaction_of_a_turn_is_its_own_task():
     assert len(ids) == 4 and ids[0] == ids[1] and ids[2] == ids[3] and ids[0] != ids[2]
 
 
+def test_a_compaction_that_ends_in_a_compression_warning_is_a_failed_task():
+    turn, events = _turn(_adapter()[0])
+    _report(turn, [("lifecycle", COMPACTION_STATUS), ("warn", "⚠ Slack rate limited, retrying"), REFUSED])
+    started, failed = _queued(events)
+    assert failed["type"] == "tool.completed" and failed["tool_call_id"] == started["tool_call_id"]
+    assert failed["is_error"]
+    _report(turn, ONE_COMPACTION)
+    assert _queued(events)[0]["tool_call_id"] != started["tool_call_id"]
+
+
 @pytest.mark.parametrize("event_type,message", [
     ("lifecycle", "⚠️  Thinking block signature invalid, suppressed rejected Anthropic replay blocks and retrying..."),
     ("lifecycle", "Session is free; loading the latest transcript..."),
     ("warn", "⚠ Context is over the compression threshold (~1 tokens >= 1) but compression is currently blocked (x)."),
     ("compacted", COMPACTION_DONE_STATUS),
+    REFUSED,
 ])
 def test_thinking_and_other_status_lines_add_no_task(event_type, message):
     turn, events = _turn(_adapter()[0])

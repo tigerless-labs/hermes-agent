@@ -918,7 +918,8 @@ class TurnRunner:
 
     def _native_compaction_task(self, event_type: str, message: str) -> None:
         """``extra.task_card_compaction_title``: a context compaction is one task on the card, from its first
-        progress line to its done edge, the way a tool is."""
+        progress line to its done edge, the way a tool is. An attempt that ends without committing emits a
+        compression warning instead of the done edge; that warning ends the task as failed."""
         ctx = self._ctx
         if not self._native_card_gate():
             return
@@ -927,10 +928,11 @@ class TurnRunner:
         if not title:
             return
         from agent.conversation_compression import is_compaction_progress_status
-        if event_type == "compacted":
+        failed = event_type == "warn" and "compress" in str(message or "").lower()
+        if event_type == "compacted" or failed:
             if self._open_compaction_task:
                 ctx.progress_queue.put({"type": "tool.completed", "tool_call_id": self._open_compaction_task,
-                                        "tool_name": title, "is_error": False})
+                                        "tool_name": title, "is_error": failed})
                 self._open_compaction_task = None
             return
         if self._open_compaction_task or event_type == "warn" or not is_compaction_progress_status(message):
