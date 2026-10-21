@@ -11,6 +11,8 @@ import time
 import weakref
 from typing import Any, Dict, List, Optional, Tuple
 
+import hermes_state_usage_events
+
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
 
@@ -359,12 +361,27 @@ class SessionUsageMixin:
         sess = dict(row) if (row is not None and not task) else {}
         counts = [v or 0 for v in (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)]
         now = time.time()
+        usage_events = self._usage_events_on()
+        if usage_events:
+            hermes_state_usage_events.carry_over_once(conn)
         conn.execute(_MODEL_USAGE_UPSERT_SQL, (
             session_id, model or sess.get("model") or "unknown",
             billing_provider or sess.get("billing_provider") or "",
             billing_base_url or sess.get("billing_base_url") or "",
             billing_mode or sess.get("billing_mode") or "", task or "", api_call_count or 0, *counts,
             float(estimated_cost_usd or 0.0), float(actual_cost_usd or 0.0), cost_status, cost_source, now, now))
+        if usage_events:
+            hermes_state_usage_events.record_event(
+                conn, session_id, now,
+                (model or sess.get("model") or "unknown", billing_provider or sess.get("billing_provider") or "",
+                 billing_base_url or sess.get("billing_base_url") or "", billing_mode or sess.get("billing_mode") or "",
+                 task or ""),
+                (api_call_count or 0, *counts), float(estimated_cost_usd or 0.0), float(actual_cost_usd or 0.0))
+
+    def _usage_events_on(self) -> bool:
+        if getattr(self, "_usage_events_switch", None) is None:
+            self._usage_events_switch = hermes_state_usage_events.usage_events_enabled()
+        return self._usage_events_switch
 
     def record_auxiliary_usage(
         self, session_id: str, task: str, *, model: Optional[str]=None, billing_provider: Optional[str]=None,
