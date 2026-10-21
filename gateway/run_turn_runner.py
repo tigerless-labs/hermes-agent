@@ -86,6 +86,8 @@ class TurnRunner:
     def __init__(self, runner: GatewayRunner, ctx: TurnContext) -> None:
         self._runner = runner
         self._ctx = ctx
+        self._compactions_on_card = 0
+        self._open_compaction_task: Optional[str] = None
 
     # ── shared thread→loop plumbing ─────────────────────────────────────────────────────────
 
@@ -505,6 +507,26 @@ class TurnRunner:
             logger.debug("Slack native progress queue drain failed", exc_info=True)
         return changed
 
+    async def _task_card_close_open_tasks(self, st) -> None:
+        """``extra.task_card_close_open_tasks``: a task still running when the card ends goes out closed (an error
+        after ``stop``, else complete), so Slack does not spin it on a finished card. Only tasks already on the card
+        change; events still queued are not applied."""
+        closes = getattr(st.adapter, "native_task_card_closes_open_tasks", None)
+        if not (callable(closes) and closes()):
+            return
+        open_tasks = [task for task in st.tasks.values() if task["status"] == "in_progress"]
+        if not open_tasks:
+            return
+        status = "error" if self._agent_interrupted() else "complete"
+        for task in open_tasks:
+            task["status"] = status
+        try:
+            await self._task_card_publish(st)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("task-card close of open tasks failed during turn cleanup", exc_info=True)
+
     async def _send_native_task_card_progress(self, adapter) -> None:
         """Drain progress into native cards; supported destinations retain editable fallback.
         Unsupported destinations and egress refusals suppress publication, never finalization.
@@ -526,6 +548,7 @@ class TurnRunner:
             if self._task_card_drain(st) and ctx._run_still_current() and not self._agent_interrupted():
                 await self._task_card_publish(st)
         finally:
+            await self._task_card_close_open_tasks(st)
             if hasattr(adapter, "stop_native_task_card_progress"):
                 # Best-effort on the turn-cleanup path: an escaping transport exception would skip
                 # final-delivery logic (cleanup awaits catch only CancelledError).
@@ -893,10 +916,36 @@ class TurnRunner:
         except Exception:
             logger.debug("Failed to attach session title callback", exc_info=True)
 
+    def _native_compaction_task(self, event_type: str, message: str) -> None:
+        """``extra.task_card_compaction_title``: a context compaction is one task on the card, from its first
+        progress line to its done edge, the way a tool is."""
+        ctx = self._ctx
+        if not self._native_card_gate():
+            return
+        resolve = getattr(self._runner._delivery_adapter_for(ctx.source), "native_task_card_compaction_title", None)
+        title = resolve() if callable(resolve) else ""
+        if not title:
+            return
+        from agent.conversation_compression import is_compaction_progress_status
+        if event_type == "compacted":
+            if self._open_compaction_task:
+                ctx.progress_queue.put({"type": "tool.completed", "tool_call_id": self._open_compaction_task,
+                                        "tool_name": title, "is_error": False})
+                self._open_compaction_task = None
+            return
+        if self._open_compaction_task or event_type == "warn" or not is_compaction_progress_status(message):
+            return
+        self._compactions_on_card += 1
+        self._open_compaction_task = f"compaction-{self._compactions_on_card}"
+        ctx.progress_queue.put({"type": "tool.started", "tool_call_id": self._open_compaction_task,
+                                "tool_name": title, "preview": ""})
+
     def _status_callback_sync(self, event_type: str, message: str) -> None:
         from gateway.run import _prepare_gateway_status_message, _redact_gateway_user_facing_secrets, _send_or_update_status_coro
         from gateway.warning_notifications import is_warning_status, render_notification
         ctx = self._ctx
+        if ctx._native_slack_task_cards:
+            self._native_compaction_task(event_type, message)
         if ctx.mute_notification_reply or not self._status_live():
             return
         prepared = _prepare_gateway_status_message(ctx.source.platform, event_type, message)
