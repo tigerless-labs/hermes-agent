@@ -135,6 +135,43 @@ async def test_one_odd_name_does_not_break_the_other_mentions():
     assert out == r"@dev\ops and @Alice Example ship it"
 
 
+def _adapter_keeping_ids(names, extra=None):
+    adapter = _adapter_with_names(names)
+    adapter.config = MagicMock(extra={"mention_user_ids": True} if extra is None else extra)
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_mentions_keep_their_slack_id_beside_the_name_when_switched_on():
+    adapter = _adapter_keeping_ids({"U07ALICE": "Alice Example", "U07BOB": "Bob Example"})
+    out = await adapter._humanize_user_mentions("hey <@U07ALICE> and <@U07BOB|bob>", chat_id="C1")
+    assert out == "hey @Alice Example (Slack user <@U07ALICE>) and @Bob Example (Slack user <@U07BOB>)"
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_mention_keeps_its_id_each_time_without_doubling():
+    adapter = _adapter_keeping_ids({"U07ALICE": "Alice Example"})
+    out = await adapter._humanize_user_mentions("<@U07ALICE> then <@U07ALICE> again", chat_id="C1")
+    assert out == "@Alice Example (Slack user <@U07ALICE>) then @Alice Example (Slack user <@U07ALICE>) again"
+
+
+@pytest.mark.asyncio
+async def test_an_odd_display_name_stays_literal_beside_the_kept_id():
+    adapter = _adapter_keeping_ids({"U07ODD": r"\g<0>"})
+    out = await adapter._humanize_user_mentions("hi <@U07ODD>", chat_id="C1")
+    assert out == r"hi @\g<0> (Slack user <@U07ODD>)"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra", [{}, {"mention_user_ids": False}, {"mention_user_ids": "off"}, None])
+async def test_mentions_read_as_names_only_by_default(extra):
+    adapter = _adapter_with_names({"U07ALICE": "Alice Example"})
+    if extra is not None:
+        adapter.config = MagicMock(extra=extra)
+    out = await adapter._humanize_user_mentions("hey <@U07ALICE>", chat_id="C1")
+    assert out == "hey @Alice Example"
+
+
 # ----- _build_identity_prompt --------------------------------------------------
 
 def test_identity_prompt_names_the_bot():
