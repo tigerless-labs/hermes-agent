@@ -2337,6 +2337,9 @@ DEFAULT_CONFIG = {
         # retention window before removal. Default true since #54189: without it state.db grows without
         # bound (multi-GB installs reported within weeks).
         "retention_days": 90,
+        # Fork: also append each usage delta with the time it was written to session_usage_events, so usage over
+        # any period can be summed (session_model_usage keeps running totals only).
+        "usage_events": False,
         # Auto-archive (soft-hide, never delete) sessions with no activity for auto_archive_days,
         # once per min_interval_hours. Pinned sessions are exempt.
         "auto_archive": False,
