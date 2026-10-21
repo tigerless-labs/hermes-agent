@@ -1447,6 +1447,7 @@ def _collect_auto_append_media_tags(
     producer-tool allowlist still applies on the fallback path.
     """
     history_media_paths = history_media_paths or set()
+    dedup_whole_result = _auto_media_dedups_whole_result()
     new_messages = (messages[history_offset:]
                     if history_offset and len(messages) >= history_offset else messages)
 
@@ -1469,6 +1470,9 @@ def _collect_auto_append_media_tags(
             except Exception:
                 payload = None
             if isinstance(payload, dict) and payload.get("success"):
+                if dedup_whole_result and any(payload.get(field) in history_media_paths
+                                              for field in _JSON_MEDIA_TOOL_PATH_FIELDS):
+                    continue
                 for field in _JSON_MEDIA_TOOL_PATH_FIELDS:
                     path = payload.get(field)
                     if (isinstance(path, str)
@@ -2867,6 +2871,13 @@ def _binds_session_id_per_turn() -> bool:
     """``gateway.bind_session_id_per_turn``: bind each turn's session id with its other session vars. Upstream
     publishes the id only when an agent is built, so tools on a cached agent's later turns saw none."""
     return bool((_load_gateway_config().get("gateway") or {}).get("bind_session_id_per_turn", False))
+
+
+def _auto_media_dedups_whole_result() -> bool:
+    """``gateway.auto_media_dedup_whole_result``: a generated image any of whose paths is already in history
+    is skipped as a whole. Upstream records one path per result but appends the first unrecorded one, so after
+    compaction an earlier turn's image rode a later reply under its model-visible path."""
+    return bool((_load_gateway_config().get("gateway") or {}).get("auto_media_dedup_whole_result", False))
 
 
 def _load_gateway_config(config_path: Path | None = None) -> dict:

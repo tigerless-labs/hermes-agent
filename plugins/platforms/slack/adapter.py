@@ -2109,6 +2109,17 @@ class SlackAdapter(BasePlatformAdapter):
         extra = self.config.extra if isinstance(self.config.extra, dict) else {}
         return str(extra.get("task_card_failure_label") or "")
 
+    def native_task_card_compaction_title(self) -> str:
+        """Title of the task a context compaction shows on the card when ``extra.task_card_compaction_title`` is
+        set; unset: compaction stays off the card."""
+        extra = self.config.extra if isinstance(self.config.extra, dict) else {}
+        return str(extra.get("task_card_compaction_title") or "")
+
+    def native_task_card_closes_open_tasks(self) -> bool:
+        """``extra.task_card_close_open_tasks``: a task still running when the card ends goes out closed."""
+        extra = self.config.extra if isinstance(self.config.extra, dict) else {}
+        return self._truthy_config(extra.get("task_card_close_open_tasks", False))
+
     def _task_card_chunk(self, task: Dict[str, str]) -> Dict[str, Any]:
         chunk = self._task_update_chunk(task)
         label = self.native_task_card_failure_label()

@@ -2286,6 +2286,10 @@ DEFAULT_CONFIG = {
         # Upstream publishes the id only when an agent is built, so on a cached agent's later turns tools saw
         # none (no sandbox fetch, no process owner). False keeps upstream's behaviour.
         "bind_session_id_per_turn": False,
+        # True: a generated image any of whose paths is already in history is not auto-appended again. Upstream
+        # records one path per result but appends the first unrecorded one, so after compaction an earlier
+        # turn's image rode a later reply. False keeps upstream's behaviour.
+        "auto_media_dedup_whole_result": False,
         "api_server": {  # OpenAI-compatible API server platform (gateway/platforms/api_server.py).
             # Max concurrent agent runs. Requests to /v1/chat/completions, /v1/responses, and
             # /v1/runs beyond this get HTTP 429 + Retry-After, bounding CPU/memory/LLM-quota
