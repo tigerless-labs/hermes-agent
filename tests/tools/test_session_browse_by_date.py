@@ -10,7 +10,7 @@ import pytest
 import hermes_state_browse_window
 from hermes_state import SessionDB
 from hermes_state_browse_window import BrowseSettings
-from tests.tools.test_session_visibility import Provider, Rule, _session, visibility  # noqa: F401
+from tests.tools.test_session_visibility import Provider, Rule, _session, visibility
 from tools import session_search_tool
 from tools.session_search_tool import session_search
 

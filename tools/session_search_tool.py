@@ -550,7 +550,7 @@ def _window_bound(value: Optional[str]) -> Optional[float]:
     return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp()
 
 
-def _browse_entry(session: Dict[str, Any], link_profile: Optional[str]) -> Dict[str, Any]:
+def _browse_entry(session: dict[str, Any], link_profile: Optional[str]) -> dict[str, Any]:
     return {"session_id": session.get("id", ""), "link": _session_link(session.get("id", ""), link_profile),
             "title": session.get("title") or None,
             **{k: session.get(k, "") for k in ("source", "started_at", "last_active")},
