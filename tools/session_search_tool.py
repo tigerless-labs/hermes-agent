@@ -8,6 +8,7 @@ READ (``session_id`` alone; whole session or head/tail), BROWSE (no args).
 No LLM calls — every shape returns actual DB messages.
 """
 
+import copy
 import json
 import logging
 import re
@@ -15,6 +16,7 @@ import time
 from datetime import datetime, timezone, UTC
 from typing import Any, Dict, List, Optional, Union
 
+import hermes_state_browse_window
 from agent.session_visibility import WITHHELD_TOOL_RESULT, VisibilityGate
 from hermes_state_common import _BOUNDARY_END_REASONS
 from hermes_time import safe_strftime
@@ -539,6 +541,53 @@ def _list_recent_sessions(db, limit: int, current_session_id: str | None = None,
     return err or out
 
 
+def _window_bound(value: Optional[str]) -> Optional[float]:
+    """``_parse_iso_bound`` to the microsecond for an ISO value, so a page's ``next_before`` is exact."""
+    bound = _parse_iso_bound(value)
+    if bound is None or _RELATIVE_BOUND_RE.match(str(value).strip()):
+        return bound
+    parsed = datetime.fromisoformat(str(value).strip())
+    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp()
+
+
+def _browse_entry(session: dict[str, Any], link_profile: Optional[str]) -> dict[str, Any]:
+    return {"session_id": session.get("id", ""), "link": _session_link(session.get("id", ""), link_profile),
+            "title": session.get("title") or None,
+            **{k: session.get(k, "") for k in ("source", "started_at", "last_active")},
+            "message_count": session.get("message_count", 0), "preview": session.get("preview", "")}
+
+
+def _list_sessions_started_between(db, after_ts: Optional[float], before_ts: Optional[float], limit: int,
+                                   current_session_id: Optional[str] = None, link_profile: Optional[str] = None,
+                                   gate: Optional[VisibilityGate] = None) -> str:
+    """Browse by start time (fork, ``sessions.browse_by_date``): newest first; a page stops at ``limit``
+    shown or at the end of the scan, and names as ``next_before`` the start of the last session it looked at,
+    shown or not, so the next page neither repeats nor skips one."""
+    def _browse():
+        scan = limit + 1 if gate is None else max(_GATED_BROWSE_SCAN, limit + 1)
+        sessions = hermes_state_browse_window.sessions_started_between(
+            db, after_ts=after_ts, before_ts=before_ts, limit=scan, exclude_sources=_HIDDEN_SESSION_SOURCES)
+        shown, examined = [], 0
+        for session in sessions:
+            if len(shown) >= limit:
+                break
+            examined += 1
+            if session.get("id") == current_session_id:
+                continue
+            if gate is None or gate.sees(db, session.get("id", "")):
+                shown.append(session)
+        more = examined < len(sessions) or len(sessions) == scan
+        page = {"next_before": datetime.fromtimestamp(sessions[examined - 1]["started_at"], UTC).isoformat()} \
+            if more and examined else {}
+        return _ok(mode="browse", results=[_browse_entry(s, link_profile) for s in shown], count=len(shown),
+                   message=f"Showing {len(shown)} sessions that started in the range, newest first. " + (
+                       "Call again with before=next_before for the earlier ones." if page
+                       else "That is every one in the range."), **page)
+
+    out, err = _loud(_browse, "Error listing sessions by start time: %s", "Failed to list sessions")
+    return err or out
+
+
 def _first_shown(gate: Optional[VisibilityGate], db, sessions, limit: int) -> List[Dict[str, Any]]:
     shown = []
     for s in sessions:
@@ -652,8 +701,17 @@ def _dispatch_shape(query, role_filter, limit, db, current_session_id, session_i
         if around_message_id is not None:
             return _scroll(db, session_id.strip(), around_message_id, window, current_session_id, gate)
         return _read_scoped(db, session_id.strip(), profile, gate)
-    limit = _clamp_int(limit, 3, 1, 10)
-    if not query or not isinstance(query, str) or not query.strip():
+    browse = hermes_state_browse_window.browse_settings()
+    browsing = not query or not isinstance(query, str) or not query.strip()
+    limit = _clamp_int(limit, 3, 1, browse.max_results if browsing else 10)
+    if browsing and browse.by_date and (after or before):
+        try:
+            after_ts, before_ts = _window_bound(after), _window_bound(before)
+        except ValueError as e:
+            return tool_error(str(e), success=False)
+        return _list_sessions_started_between(db, after_ts, before_ts, limit, current_session_id,
+                                              link_profile=profile, gate=gate)
+    if browsing:
         return _list_recent_sessions(db, limit, current_session_id, link_profile=profile, gate=gate)
     sort_norm = sort.strip().lower() if isinstance(sort, str) else None
     try:
@@ -835,6 +893,34 @@ SESSION_SEARCH_SCHEMA = {
 
 from tools.registry import registry, tool_error
 
+
+def _session_search_schema_overrides() -> dict:
+    """With ``sessions.browse_by_date`` on, the description says browsing takes after/before and its own limit."""
+    browse = hermes_state_browse_window.browse_settings()
+    if not browse.by_date:
+        return {}
+    description = SESSION_SEARCH_SCHEMA["description"].replace(
+        "no args = browse recent sessions.",
+        "no query = browse: the most recent sessions, or with after/before every session that started in that "
+        "range, newest first.")
+    params = copy.deepcopy(SESSION_SEARCH_SCHEMA["parameters"])
+    properties = params["properties"]
+    properties["limit"]["description"] = (
+        f"Max sessions to return (default 3): up to 10 when searching, up to {browse.max_results} when browsing. "
+        "Searching: bump to 5–10 when the topic likely spans several sessions. Browsing a time range: ask for "
+        "as many as you will list.")
+    properties["after"]["description"] = (
+        "Inclusive lower bound on session start time, for searching and for browsing (no query: the sessions "
+        "that started in the range). ISO date/datetime (e.g. 2026-06-01) or relative duration (7d, 24h, 2w = "
+        "within the last N). Use only when the user names a time frame. sort is a ranking bias, not a bound.")
+    properties["before"]["description"] = (
+        "Exclusive upper bound on session start time, for searching and for browsing. ISO date/datetime (a "
+        "date-only value is midnight UTC that day) or relative duration (7d = older than a week). A browse "
+        "answer with next_before has more sessions in the range: pass it here for the next page. Use only "
+        "when the user names a time frame.")
+    return {"description": description, "parameters": params}
+
+
 registry.register(
     name="session_search",
     toolset="session_search",
@@ -845,4 +931,5 @@ registry.register(
         **{k: args.get(k) for k in ("role_filter", "session_id", "around_message_id", "sort", "profile",
                                     "after", "before", "exclude_session_ids")}),
     check_fn=check_session_search_requirements,
+    dynamic_schema_overrides=_session_search_schema_overrides,
     emoji="🔍")
