@@ -2340,6 +2340,11 @@ DEFAULT_CONFIG = {
         # Fork: also append each usage delta with the time it was written to session_usage_events, so usage over
         # any period can be summed (session_model_usage keeps running totals only).
         "usage_events": False,
+        # Fork: session_search browse (no query) also takes after/before, listing the sessions that started in the
+        # range newest first, with the next page's before when a page is full.
+        "browse_by_date": False,
+        # Fork: the most sessions one browse lists; searching keeps its own cap.
+        "browse_max_results": 10,
         # Auto-archive (soft-hide, never delete) sessions with no activity for auto_archive_days,
         # once per min_interval_hours. Pinned sessions are exempt.
         "auto_archive": False,
