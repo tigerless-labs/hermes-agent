@@ -2115,6 +2115,13 @@ class SlackAdapter(BasePlatformAdapter):
         extra = self.config.extra if isinstance(self.config.extra, dict) else {}
         return str(extra.get("task_card_compaction_title") or "")
 
+    def mentions_keep_user_ids(self) -> bool:
+        """``extra.mention_user_ids``: a mention of another person reads ``@Name (Slack user <@UID>)``, so the
+        agent can name that person by the same verifiable id the sender prefix gives the speaker."""
+        config = getattr(self, "config", None)
+        extra = config.extra if config is not None and isinstance(config.extra, dict) else {}
+        return self._truthy_config(extra.get("mention_user_ids", False))
+
     def native_task_card_closes_open_tasks(self) -> bool:
         """``extra.task_card_close_open_tasks``: a task still running when the card ends goes out closed."""
         extra = self.config.extra if isinstance(self.config.extra, dict) else {}
@@ -3600,13 +3607,15 @@ class SlackAdapter(BasePlatformAdapter):
         its own). The bot's own mention is stripped before this runs."""
         if not text or "<@" not in text:
             return text
+        keep_ids = self.mentions_keep_user_ids()
         # Keep only the ID; tokens may carry a label like <@U123|alice>.
         for uid in set(re.findall(r"<@([A-Z0-9]+)(?:\|[^>]*)?>", text)):
             name = await self._resolve_user_name(uid, chat_id=chat_id, team_id=team_id)
             display = (name or uid).strip() or uid
+            label = f"@{display} (Slack user <@{uid}>)" if keep_ids else f"@{display}"
             # Function replacement inserts the user-set name verbatim; as a template ``re`` would
             # parse backslashes/group refs (``dev\ops`` raises; ``\g<0>`` re-injects the mention).
-            text = re.sub(rf"<@{uid}(?:\|[^>]*)?>", lambda _m, _name=f"@{display}": _name, text)
+            text = re.sub(rf"<@{uid}(?:\|[^>]*)?>", lambda _m, _name=label: _name, text)
         return text
 
     def _build_identity_prompt(self, team_id: str = "") -> str:
