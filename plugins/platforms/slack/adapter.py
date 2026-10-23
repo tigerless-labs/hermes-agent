@@ -4481,6 +4481,8 @@ class SlackAdapter(BasePlatformAdapter):
         updated_message = event.get("message")
         if not isinstance(updated_message, dict):
             return None
+        if self._slack_changed_messages_edits_only() and not self._change_carries_new_edit(event):
+            return None
         original_message_ts = str(updated_message.get("ts") or "")
         if original_message_ts and original_message_ts in self._processed_message_ts:
             return None
@@ -4498,6 +4500,18 @@ class SlackAdapter(BasePlatformAdapter):
         if changed_event_ts:
             normalized_event["_slack_changed_event_ts"] = changed_event_ts
         return normalized_event
+
+    @staticmethod
+    def _change_carries_new_edit(event: dict) -> bool:
+        """``extra.changed_messages_edits_only``: True when the change's ``edited`` stamp has a ts the
+        previous version lacks. A reply raising a root's reply count or a link unfurl changes a message
+        without one, and a message edited earlier keeps the earlier stamp through those changes."""
+        def edit_ts(message: Any) -> str:
+            edited = message.get("edited") if isinstance(message, dict) else None
+            return str(edited.get("ts") or "") if isinstance(edited, dict) else ""
+
+        new_edit_ts = edit_ts(event.get("message"))
+        return bool(new_edit_ts) and new_edit_ts != edit_ts(event.get("previous_message"))
 
     @staticmethod
     def _append_link_unfurls(text: str, slack_attachments: list) -> str:
@@ -6803,6 +6817,9 @@ class SlackAdapter(BasePlatformAdapter):
     _slack_strict_mention = _extra_or_env_flag_getter("strict_mention", "SLACK_STRICT_MENTION")
     _slack_mentioned_thread_replies_only = _extra_or_env_flag_getter(
         "mentioned_thread_replies_only", "SLACK_MENTIONED_THREAD_REPLIES_ONLY")
+    # changed_messages_edits_only: a message_changed event is handled only when it carries a new edit.
+    _slack_changed_messages_edits_only = _extra_or_env_flag_getter(
+        "changed_messages_edits_only", "SLACK_CHANGED_MESSAGES_EDITS_ONLY")
     _slack_ignore_other_user_mentions = _extra_or_env_flag_getter(
         "ignore_other_user_mentions", "SLACK_IGNORE_OTHER_USER_MENTIONS")
     _slack_thread_require_mention = _extra_or_env_flag_getter(
