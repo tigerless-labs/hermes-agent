@@ -381,6 +381,9 @@ DEFAULT_CONFIG = {
         # "chat": each chat writes and mounts only its own cache/<kind>/chats/<chat> (uploads, screenshots,
         # web pages, spillover), media delivery refuses other chats' files, chat-less sessions mount none.
         "docker_cache_scope": "shared",
+        # true: the terminal tool words waiting as background work that wakes the model when it exits
+        # (messaging gateways), instead of upstream's foreground sleep.
+        "wait_in_background": False,
         # Hours before every cache sweep (uploads, screenshots, spillover, session temp) deletes a file;
         # a whole number >= 1, anything else keeps 24.
         "cache_max_age_hours": 24,

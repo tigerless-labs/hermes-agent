@@ -164,6 +164,21 @@ Use read_file, search_files, patch and write_file instead of cat/head/tail, grep
 Foreground (default) returns as soon as the command finishes. To wait a fixed time, run the wait in the foreground; never background a sleep or polling loop. Background is only for commands that must keep running after this call returns; health-check a server in a separate call and manage jobs with process_manage. When a command changes directory, trust the result's "cwd" instead of prefixing later commands with cd.
 """
 
+# ``terminal.wait_in_background`` (messaging gateways): a background command outlives the turn and its completion
+# wakes the model in the same conversation, so waiting is worded as background work instead of a foreground sleep.
+FOREGROUND_WAIT_GUIDANCE = (
+    "Foreground (default) returns as soon as the command finishes. To wait a fixed time, run the wait in the "
+    "foreground; never background a sleep or polling loop. Background is only for commands that must keep running "
+    "after this call returns;")
+BACKGROUND_WAIT_GUIDANCE = (
+    "Foreground (default) holds your turn until the command finishes. With background=true and notify=true a command "
+    "keeps running after your turn ends and wakes you in this conversation when it exits: run a long command that "
+    "way, or a wait of a minute or more (a sleep) before checking on something, then end your turn and tell the user "
+    "you will report back;")
+BACKGROUND_PARAMETER_GUIDANCE = (
+    "Keep running after this call and after your turn ends; returns a session_id. With notify=true you are woken in "
+    "this conversation when it exits.")
+
 # Environment lifecycle state.
 _active_environments: dict[str, Any] = {}
 _last_activity: dict[str, float] = {}
@@ -1627,6 +1642,26 @@ def _handle_terminal(args, **kw):
     )
 
 
+def _wait_in_background() -> bool:
+    from hermes_cli.config import load_config_readonly
+    from utils import is_truthy_value
+
+    section = load_config_readonly().get("terminal")
+    return isinstance(section, dict) and is_truthy_value(section.get("wait_in_background"), default=False)
+
+
+def _terminal_schema_overrides() -> dict:
+    """Per-call overrides: ``terminal.wait_in_background`` words waiting as background work; off keeps upstream's."""
+    if not _wait_in_background():
+        return {}
+    properties = TERMINAL_SCHEMA["parameters"]["properties"]
+    return {
+        "description": TERMINAL_TOOL_DESCRIPTION.replace(FOREGROUND_WAIT_GUIDANCE, BACKGROUND_WAIT_GUIDANCE),
+        "parameters": {**TERMINAL_SCHEMA["parameters"], "properties": {
+            **properties, "background": {**properties["background"], "description": BACKGROUND_PARAMETER_GUIDANCE}}},
+    }
+
+
 registry.register(
     name="terminal",
     toolset="terminal",
@@ -1635,4 +1670,5 @@ registry.register(
     check_fn=check_terminal_requirements,
     emoji="💻",
     max_result_size_chars=100_000,
+    dynamic_schema_overrides=_terminal_schema_overrides,
 )
