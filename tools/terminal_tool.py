@@ -164,21 +164,6 @@ Use read_file, search_files, patch and write_file instead of cat/head/tail, grep
 Foreground (default) returns as soon as the command finishes. To wait a fixed time, run the wait in the foreground; never background a sleep or polling loop. Background is only for commands that must keep running after this call returns; health-check a server in a separate call and manage jobs with process_manage. When a command changes directory, trust the result's "cwd" instead of prefixing later commands with cd.
 """
 
-# ``terminal.wait_in_background`` (messaging gateways): a background command outlives the turn and its completion
-# wakes the model in the same conversation, so waiting is worded as background work instead of a foreground sleep.
-FOREGROUND_WAIT_GUIDANCE = (
-    "Foreground (default) returns as soon as the command finishes. To wait a fixed time, run the wait in the "
-    "foreground; never background a sleep or polling loop. Background is only for commands that must keep running "
-    "after this call returns;")
-BACKGROUND_WAIT_GUIDANCE = (
-    "Foreground (default) holds your turn until the command finishes. With background=true and notify=true a command "
-    "keeps running after your turn ends and wakes you in this conversation when it exits: run a long command that "
-    "way, or a wait of a minute or more (a sleep) before checking on something, then end your turn and tell the user "
-    "you will report back;")
-BACKGROUND_PARAMETER_GUIDANCE = (
-    "Keep running after this call and after your turn ends; returns a session_id. With notify=true you are woken in "
-    "this conversation when it exits.")
-
 # Environment lifecycle state.
 _active_environments: dict[str, Any] = {}
 _last_activity: dict[str, float] = {}
@@ -1074,6 +1059,7 @@ class _ExecPlan:
     # Set when a foreground call asked for more than FOREGROUND_MAX_TIMEOUT and was promoted to a
     # tracked background process instead of being refused (the requested seconds, for the note).
     promoted_from_foreground_timeout: Optional[int] = None
+    promoted_from_foreground_sleep: Optional[float] = None
 
 
 _PROMOTED_NOTE = (
@@ -1161,11 +1147,14 @@ def _plan_execution(
             raise _Rejected(_error_json(guidance, status="error"))
         if timeout and timeout > FOREGROUND_MAX_TIMEOUT:
             promoted = timeout
+    from tools.terminal_wait import sleep_to_promote
+
+    promoted_sleep = None if background or promoted is not None else sleep_to_promote(command)
 
     return _ExecPlan(
         config=config, env_type=env_type, effective_task_id=effective_task_id,
         image=image, cwd=cwd, host_cwd=host_cwd, effective_timeout=timeout or config["timeout"],
-        promoted_from_foreground_timeout=promoted,
+        promoted_from_foreground_timeout=promoted, promoted_from_foreground_sleep=promoted_sleep,
     )
 
 
@@ -1461,7 +1450,8 @@ def terminal_tool(
         verdict = _run_approval_guards(command, env_type, plan.config, force=force)
 
         pty_disabled = pty and _command_requires_pipe_stdin(command)
-        if plan.promoted_from_foreground_timeout is not None:
+        promoted_sleep = getattr(plan, "promoted_from_foreground_sleep", None)
+        if plan.promoted_from_foreground_timeout is not None or promoted_sleep is not None:
             # Promotion implies notify_on_complete; watch_patterns is a background-only flag the
             # caller could not have meant for a foreground call, and the two are exclusive anyway.
             background, notify_on_complete, watch_patterns = True, True, None
@@ -1479,6 +1469,10 @@ def terminal_tool(
             )
             if plan.promoted_from_foreground_timeout is not None:
                 result = _with_promoted_note(result, plan.promoted_from_foreground_timeout)
+            if promoted_sleep is not None:
+                from tools.terminal_wait import with_promoted_sleep_note
+
+                result = with_promoted_sleep_note(result, promoted_sleep)
             return _metered(None if _host_local else plan, result)
         return _metered(None if _host_local else plan, _run_foreground(
             command, env, plan,
@@ -1642,24 +1636,10 @@ def _handle_terminal(args, **kw):
     )
 
 
-def _wait_in_background() -> bool:
-    from hermes_cli.config import load_config_readonly
-    from utils import is_truthy_value
-
-    section = load_config_readonly().get("terminal")
-    return isinstance(section, dict) and is_truthy_value(section.get("wait_in_background"), default=False)
-
-
 def _terminal_schema_overrides() -> dict:
-    """Per-call overrides: ``terminal.wait_in_background`` words waiting as background work; off keeps upstream's."""
-    if not _wait_in_background():
-        return {}
-    properties = TERMINAL_SCHEMA["parameters"]["properties"]
-    return {
-        "description": TERMINAL_TOOL_DESCRIPTION.replace(FOREGROUND_WAIT_GUIDANCE, BACKGROUND_WAIT_GUIDANCE),
-        "parameters": {**TERMINAL_SCHEMA["parameters"], "properties": {
-            **properties, "background": {**properties["background"], "description": BACKGROUND_PARAMETER_GUIDANCE}}},
-    }
+    from tools.terminal_wait import schema_overrides
+
+    return schema_overrides(TERMINAL_TOOL_DESCRIPTION, TERMINAL_SCHEMA["parameters"])
 
 
 registry.register(
