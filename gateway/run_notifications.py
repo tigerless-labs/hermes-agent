@@ -25,6 +25,7 @@ from gateway.platforms.event import MessageEvent, MessageType
 from gateway.session import SessionEntry, SessionSource, SessionStore
 from gateway.run_shutdown import _delivery_target_key, _log_suppressed, _notice_target_key, _send_error, _send_failed
 from gateway.run_notifications_ownership import GatewayNotificationOwnershipMixin
+from gateway.wake_starter import wakes_as_starter
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
@@ -926,6 +927,7 @@ class GatewayNotificationsMixin(GatewayNotificationOwnershipMixin):
                     platform, home, transport, message, "state.db warning notification failed for %s:%s: %s"),
                 platform=platform)
 
+    @wakes_as_starter
     def _build_process_event_source(self, evt: dict):
         """Resolve the canonical source for a synthetic background-process event.
 
