@@ -1503,6 +1503,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
                         exit_code = int(exit_str.splitlines()[-1].strip())
                     except (ValueError, IndexError):
                         exit_code = -1
+                    from tools.process_registry_final_read import append_output_after_exit
+                    append_output_after_exit(self, session, env, log_path, prev_output_bytes)
                     self._finish_exited(session, exit_code)
                     return
             except Exception:
