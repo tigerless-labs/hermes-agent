@@ -1059,6 +1059,7 @@ class _ExecPlan:
     # Set when a foreground call asked for more than FOREGROUND_MAX_TIMEOUT and was promoted to a
     # tracked background process instead of being refused (the requested seconds, for the note).
     promoted_from_foreground_timeout: Optional[int] = None
+    promoted_from_foreground_sleep: Optional[float] = None
 
 
 _PROMOTED_NOTE = (
@@ -1146,11 +1147,14 @@ def _plan_execution(
             raise _Rejected(_error_json(guidance, status="error"))
         if timeout and timeout > FOREGROUND_MAX_TIMEOUT:
             promoted = timeout
+    from tools.terminal_wait import sleep_to_promote
+
+    promoted_sleep = None if background or promoted is not None else sleep_to_promote(command)
 
     return _ExecPlan(
         config=config, env_type=env_type, effective_task_id=effective_task_id,
         image=image, cwd=cwd, host_cwd=host_cwd, effective_timeout=timeout or config["timeout"],
-        promoted_from_foreground_timeout=promoted,
+        promoted_from_foreground_timeout=promoted, promoted_from_foreground_sleep=promoted_sleep,
     )
 
 
@@ -1446,7 +1450,8 @@ def terminal_tool(
         verdict = _run_approval_guards(command, env_type, plan.config, force=force)
 
         pty_disabled = pty and _command_requires_pipe_stdin(command)
-        if plan.promoted_from_foreground_timeout is not None:
+        promoted_sleep = getattr(plan, "promoted_from_foreground_sleep", None)
+        if plan.promoted_from_foreground_timeout is not None or promoted_sleep is not None:
             # Promotion implies notify_on_complete; watch_patterns is a background-only flag the
             # caller could not have meant for a foreground call, and the two are exclusive anyway.
             background, notify_on_complete, watch_patterns = True, True, None
@@ -1464,6 +1469,10 @@ def terminal_tool(
             )
             if plan.promoted_from_foreground_timeout is not None:
                 result = _with_promoted_note(result, plan.promoted_from_foreground_timeout)
+            if promoted_sleep is not None:
+                from tools.terminal_wait import with_promoted_sleep_note
+
+                result = with_promoted_sleep_note(result, promoted_sleep)
             return _metered(None if _host_local else plan, result)
         return _metered(None if _host_local else plan, _run_foreground(
             command, env, plan,
@@ -1627,6 +1636,12 @@ def _handle_terminal(args, **kw):
     )
 
 
+def _terminal_schema_overrides() -> dict:
+    from tools.terminal_wait import schema_overrides
+
+    return schema_overrides(TERMINAL_TOOL_DESCRIPTION, TERMINAL_SCHEMA["parameters"])
+
+
 registry.register(
     name="terminal",
     toolset="terminal",
@@ -1635,4 +1650,5 @@ registry.register(
     check_fn=check_terminal_requirements,
     emoji="💻",
     max_result_size_chars=100_000,
+    dynamic_schema_overrides=_terminal_schema_overrides,
 )
