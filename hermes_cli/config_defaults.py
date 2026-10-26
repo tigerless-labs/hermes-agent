@@ -404,6 +404,9 @@ DEFAULT_CONFIG = {
         # SSH: carry exported env vars between commands (cwd always carries). false = every command
         # starts from the login env, profile functions included. Local: TERMINAL_LOCAL_PERSISTENT.
         "persistent_shell": True,
+        # true: a sandbox background job's log is read once more after it exits, so a line written just
+        # before the exit is kept (upstream finishes on the exit without reading again).
+        "read_output_after_exit": False,
     },
 
     "web": {
