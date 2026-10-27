@@ -2289,6 +2289,9 @@ DEFAULT_CONFIG = {
         # mounts inside it; the copy lands in the chat's cache. Bridged to
         # HERMES_MEDIA_TRUST_SESSION_SANDBOX. Only consulted when strict is true.
         "trust_session_sandbox": False,
+        # true: that fetch also takes a file the session wrote in the sandbox's engine folder (~/.hermes), never
+        # one the engine mounted there; false keeps the whole folder back. HERMES_MEDIA_FETCH_OWN_ENGINE_DIR_FILES.
+        "fetch_own_engine_dir_files": False,
         # True: each turn binds its session id with the other session vars, from the turn's session record.
         # Upstream publishes the id only when an agent is built, so on a cached agent's later turns tools saw
         # none (no sandbox fetch, no process owner). False keeps upstream's behaviour.

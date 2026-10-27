@@ -359,6 +359,8 @@ def _postprocess_image_generate_result(raw: str, task_id: str | None = None) -> 
             logger.warning("Could not force-sync generated image artifact: %s", exc)
     payload.setdefault("host_image", image)
     payload.setdefault("agent_visible_image", agent_path)
+    from tools.image_generation_sandbox_path import put_sandbox_path_first
+    put_sandbox_path_first(payload, agent_path)
     return json.dumps(payload, ensure_ascii=False)
 
 

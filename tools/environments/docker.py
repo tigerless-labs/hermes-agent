@@ -691,6 +691,8 @@ class DockerEnvironment(BaseEnvironment):
         egress_label, egress_volume_args, egress_host_args, env_args, validated_extra = (
             self._egress_and_env_args(extra_args))
         volume_args.extend(egress_volume_args)
+        from tools.environments.docker_mount_targets import bind_mount_targets
+        self._engine_mount_targets = bind_mount_targets(volume_args)
         user_args = _host_user_args(run_as_host_user)
 
         # Resolved once so it works when /usr/local/bin is not in PATH (macOS services).

@@ -3,7 +3,8 @@
 ``validate_media_delivery_path`` reads ``HERMES_MEDIA_DELIVERY_STRICT`` (gateway.strict),
 ``HERMES_MEDIA_ALLOW_DIRS`` (gateway.media_delivery_allow_dirs) and
 ``HERMES_MEDIA_TRUST_RECENT_FILES`` (gateway.trust_recent_files); the sandbox fetch reads
-``HERMES_MEDIA_TRUST_SESSION_SANDBOX`` (gateway.trust_session_sandbox).  Every delivery
+``HERMES_MEDIA_TRUST_SESSION_SANDBOX`` (gateway.trust_session_sandbox) and
+``HERMES_MEDIA_FETCH_OWN_ENGINE_DIR_FILES`` (gateway.fetch_own_engine_dir_files).  Every delivery
 entrypoint (gateway startup, ``hermes cron run``, ``hermes send``) calls
 :func:`apply_media_policy_env` first so standalone paths filter under the gateway's
 policy instead of silently dropping attachments in strict/allowlisted deployments.
@@ -20,7 +21,8 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 _FLAG_ENVS = (("strict", "HERMES_MEDIA_DELIVERY_STRICT"), ("trust_recent_files", "HERMES_MEDIA_TRUST_RECENT_FILES"),
-              ("trust_session_sandbox", "HERMES_MEDIA_TRUST_SESSION_SANDBOX"))
+              ("trust_session_sandbox", "HERMES_MEDIA_TRUST_SESSION_SANDBOX"),
+              ("fetch_own_engine_dir_files", "HERMES_MEDIA_FETCH_OWN_ENGINE_DIR_FILES"))
 _ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
 _TRUST_RECENT_SECONDS_ENV = "HERMES_MEDIA_TRUST_RECENT_SECONDS"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -69,6 +71,14 @@ def media_delivery_trust_session_sandbox() -> bool:
     if cfg is not None:
         return bool(cfg.get("trust_session_sandbox", False))
     return os.environ.get(_FLAG_ENVS[2][1], "0").strip().lower() in _TRUTHY
+
+
+def media_delivery_fetch_own_engine_dir_files() -> bool:
+    """That fetch may take a file the session wrote in the sandbox's engine folder, never one mounted there."""
+    cfg = _routed_gateway_cfg()
+    if cfg is not None:
+        return bool(cfg.get("fetch_own_engine_dir_files", False))
+    return os.environ.get(_FLAG_ENVS[3][1], "0").strip().lower() in _TRUTHY
 
 
 def media_delivery_trust_recent_seconds() -> str:
