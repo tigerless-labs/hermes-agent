@@ -2300,6 +2300,10 @@ DEFAULT_CONFIG = {
         # records one path per result but appends the first unrecorded one, so after compaction an earlier
         # turn's image rode a later reply. False keeps upstream's behaviour.
         "auto_media_dedup_whole_result": False,
+        # True: a background wake (subagent, background command, loop) keeps the session origin's place but runs as
+        # the person who started the work, or as no one when the work names nobody. Upstream reuses the origin whole,
+        # so in a shared thread every wake ran as the thread's opener. False keeps upstream's behaviour.
+        "wake_as_starter": False,
         "api_server": {  # OpenAI-compatible API server platform (gateway/platforms/api_server.py).
             # Max concurrent agent runs. Requests to /v1/chat/completions, /v1/responses, and
             # /v1/runs beyond this get HTTP 429 + Retry-After, bounding CPU/memory/LLM-quota
