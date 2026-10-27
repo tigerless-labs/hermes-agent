@@ -96,18 +96,28 @@ def _own_session_sandbox():
     return env if getattr(env, "_session_scoped", False) else None
 
 
-def _under_engine_mounts(path: str, remote_home: Optional[str]) -> bool:
+def _under_engine_mounts(path: str, remote_home: Optional[str], env=None) -> bool:
     """``~/.hermes`` inside the sandbox: the engine's credential files, skills and config are mounted
-    there under names no denylist can enumerate. Unknown home ⇒ any ``.hermes`` component."""
+    there under names no denylist can enumerate. Unknown home ⇒ any ``.hermes`` component. With
+    ``gateway.fetch_own_engine_dir_files``, only what lies on one of the binds the sandbox recorded when
+    it started is kept back: the rest of the folder is the session's own scratch space."""
     target = PurePosixPath(posixpath.normpath(path))
     if not remote_home:
         return ".hermes" in target.parts
     mounts = PurePosixPath(posixpath.normpath(remote_home)) / ".hermes"
-    return target == mounts or mounts in target.parents
+    if not (target == mounts or mounts in target.parents):
+        return False
+    from gateway.media_policy import media_delivery_fetch_own_engine_dir_files
+    recorded = getattr(env, "_engine_mount_targets", None)
+    if target == mounts or not isinstance(recorded, tuple) or not media_delivery_fetch_own_engine_dir_files():
+        return True
+    binds = tuple(PurePosixPath(posixpath.normpath(bind)) for bind in recorded if isinstance(bind, str))
+    return len(binds) != len(recorded) or any(target == bind or bind in target.parents for bind in binds)
 
 
-def _held_back(path: str, remote_home: Optional[str], own_sandbox_only: bool) -> bool:
-    return remote_path_is_denied(path, remote_home) or (own_sandbox_only and _under_engine_mounts(path, remote_home))
+def _held_back(path: str, remote_home: Optional[str], own_sandbox_only: bool, env=None) -> bool:
+    return remote_path_is_denied(path, remote_home) or (
+        own_sandbox_only and _under_engine_mounts(path, remote_home, env))
 
 
 # Linux allows 255 bytes per name; this leaves room and keeps platform upload names reasonable.
@@ -159,14 +169,14 @@ def fetch_remote_media(path: str) -> Optional[str]:
         if not remote_home:
             return None
         candidate = posixpath.normpath(posixpath.join(remote_home, candidate[2:]))
-    if not candidate.startswith("/") or _held_back(candidate, remote_home, own_sandbox_only):
+    if not candidate.startswith("/") or _held_back(candidate, remote_home, own_sandbox_only, env):
         return None
     folder: Optional[Path] = None
     try:
         # ``[ -f ]`` in fetch_file follows symlinks, so the link TARGET is what gets screened;
         # an unresolvable path fails closed rather than trusting the unresolved name.
         resolved = env.fetch_realpath(candidate)
-        if resolved is None or _held_back(resolved, remote_home, own_sandbox_only):
+        if resolved is None or _held_back(resolved, remote_home, own_sandbox_only, env):
             return None
         # Its own folder in the chat's document cache (the only cache delivery accepts when caches
         # are chat-scoped): the chat shows the sandbox file's own name and two copies never collide.

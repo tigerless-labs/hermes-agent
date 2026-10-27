@@ -36,9 +36,12 @@ class _Sandbox:
     """A live sandbox: a small filesystem, a symlink table, and every path it was asked to hand over."""
 
     def __init__(self, files: dict[str, bytes], *, links: dict[str, str] | None = None,
-                 session_scoped: bool = True, home: str | None = "/root") -> None:
+                 session_scoped: bool = True, home: str | None = "/root",
+                 mounts: tuple[str, ...] | None = None) -> None:
         self.files, self.links = dict(files), dict(links or {})
         self._session_scoped, self._remote_home = session_scoped, home
+        if mounts is not None:
+            self._engine_mount_targets = mounts
         self.fetched: list[str] = []
 
     def fetch_realpath(self, remote_path: str) -> str:
@@ -92,6 +95,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("TERMINAL_DOCKER_CACHE_SCOPE", "chat")
     monkeypatch.delenv("HERMES_MEDIA_DELIVERY_STRICT", raising=False)
     monkeypatch.delenv("HERMES_MEDIA_TRUST_SESSION_SANDBOX", raising=False)
+    monkeypatch.delenv("HERMES_MEDIA_FETCH_OWN_ENGINE_DIR_FILES", raising=False)
     monkeypatch.setattr(base, "MEDIA_DELIVERY_SAFE_ROOTS", (hermes / "cache" / "documents",))
     monkeypatch.setattr(base, "_profile_cache_roots", lambda: [])
     return hermes
@@ -427,3 +431,86 @@ def test_redteam_a_sessionless_reply_never_falls_back_to_a_shared_sandbox_key(
 
     assert asyncio.run(background_reply()) is None
     assert sandboxes["default"].fetched == []
+
+
+ENGINE_MOUNTS = ("/root/.hermes/my_token.json", "/root/.hermes/skills")
+OWN_ARTICLE = "/root/.hermes/cache/outbox/article.md"
+
+
+@pytest.fixture
+def own_engine_dir_files(trusted: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERMES_MEDIA_FETCH_OWN_ENGINE_DIR_FILES", "1")
+
+
+def test_switched_on_delivery_sends_a_file_the_session_wrote_in_the_engine_dir(
+        home: Path, sandboxes: dict, own_engine_dir_files: None) -> None:
+    sandboxes[OWN] = _Sandbox({OWN_ARTICLE: b"own"}, mounts=ENGINE_MOUNTS)
+
+    delivered, _ = _deliver(f"MEDIA:{OWN_ARTICLE}", {SESSION_KEY: OWN})
+
+    assert [Path(path).read_bytes() for path in delivered] == [b"own"]
+    assert Path(delivered[0]).name == "article.md"
+
+
+def test_strict_delivery_keeps_the_engine_dir_back_unless_switched_on(home: Path, sandboxes: dict,
+                                                                     trusted: None) -> None:
+    sandboxes[OWN] = _Sandbox({OWN_ARTICLE: b"own"}, mounts=ENGINE_MOUNTS)
+
+    delivered, _ = _deliver(f"MEDIA:{OWN_ARTICLE}", {SESSION_KEY: OWN})
+
+    assert delivered == []
+    assert sandboxes[OWN].fetched == []
+
+
+def test_redteam_what_the_engine_mounted_never_leaves_when_the_sessions_own_files_do(
+        home: Path, sandboxes: dict, own_engine_dir_files: None) -> None:
+    held_back = ["/root/.hermes/my_token.json", "/root/.hermes/skills/notes/SKILL.md", "/root/.hermes/auth.json",
+                 "/root/.hermes/.env", "/root/.hermes", "/root/.ssh/id_rsa", "/tmp/innocent.txt",
+                 "/root/.hermes/cache/outbox/innocent.md"]
+    sandboxes[OWN] = _Sandbox({**{path: b"SECRET" for path in held_back}, OWN_ARTICLE: b"own"},
+                              links={"/tmp/innocent.txt": "/root/.hermes/my_token.json",
+                                     "/root/.hermes/cache/outbox/innocent.md": "/root/.hermes/skills/notes/SKILL.md"},
+                              mounts=ENGINE_MOUNTS)
+
+    delivered, _ = _deliver("\n".join(f"MEDIA:{path}" for path in [*held_back, OWN_ARTICLE]), {SESSION_KEY: OWN})
+
+    assert [Path(path).read_bytes() for path in delivered] == [b"own"]
+    assert sandboxes[OWN].fetched == [OWN_ARTICLE]
+
+
+def test_redteam_a_sandbox_that_recorded_no_mounts_keeps_the_whole_engine_dir_back(
+        home: Path, sandboxes: dict, own_engine_dir_files: None) -> None:
+    sandboxes[OWN] = _Sandbox({OWN_ARTICLE: b"own", REPORT: b"own"})
+
+    delivered, _ = _deliver(f"MEDIA:{OWN_ARTICLE} MEDIA:{REPORT}", {SESSION_KEY: OWN})
+
+    assert sandboxes[OWN].fetched == [REPORT]
+    assert [Path(path).read_bytes() for path in delivered] == [b"own"]
+
+
+def test_redteam_a_mount_over_the_whole_engine_dir_keeps_all_of_it_back(
+        home: Path, sandboxes: dict, own_engine_dir_files: None) -> None:
+    sandboxes[OWN] = _Sandbox({OWN_ARTICLE: b"own"}, mounts=("/root",))
+
+    delivered, _ = _deliver(f"MEDIA:{OWN_ARTICLE}", {SESSION_KEY: OWN})
+
+    assert delivered == []
+    assert sandboxes[OWN].fetched == []
+
+
+def test_the_own_engine_dir_switch_is_off_by_default_known_to_the_config_and_bridged_to_the_env(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from gateway import media_policy
+    from hermes_cli.config import _validate_config_key
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+    monkeypatch.setenv("HERMES_MEDIA_FETCH_OWN_ENGINE_DIR_FILES", "")
+    assert DEFAULT_CONFIG["gateway"]["fetch_own_engine_dir_files"] is False
+    assert _validate_config_key("gateway.fetch_own_engine_dir_files")[0]
+    assert not media_policy.media_delivery_fetch_own_engine_dir_files()
+
+    media_policy.apply_media_policy_env({"gateway": {"fetch_own_engine_dir_files": True}})
+    assert media_policy.media_delivery_fetch_own_engine_dir_files()
+
+    monkeypatch.setattr(media_policy, "_routed_gateway_cfg", lambda: {"fetch_own_engine_dir_files": False})
+    assert not media_policy.media_delivery_fetch_own_engine_dir_files()
