@@ -411,6 +411,9 @@ DEFAULT_CONFIG = {
         # true: a sandbox background job's log is read once more after it exits, so a line written just
         # before the exit is kept (upstream finishes on the exit without reading again).
         "read_output_after_exit": False,
+        # true: in a container sandbox, write_file and patch refuse targets in the engine's own folder
+        # (/root/.hermes), which media delivery never fetches, and point at /tmp (upstream writes there).
+        "refuse_engine_dir_writes": False,
     },
 
     "web": {
