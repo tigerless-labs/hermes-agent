@@ -289,13 +289,24 @@ _CRON_HINT_SILENT = (
 )
 
 
+_CRON_HINT_FAILURE = (
+    "FAILURE: If a delegated child fails and this cron run must be "
+    "recorded as failed, put [CRON_FAILURE] on the first line by itself, "
+    "then explain the child failure on following lines. "
+)
+_CRON_HINT_MARKER_PARTS = (_CRON_HINT_SILENT, _CRON_HINT_FAILURE)
+
+
 def _cron_hint() -> str:
-    """``cron.silent_marker_hint: false`` drops the [SILENT] part, for a deployment whose runs say
-    "nothing to report" another way; unset or true keeps upstream's hint."""
+    """``cron.marker_hints: false`` drops the parts asking for an in-text marker ([SILENT], [CRON_FAILURE]),
+    for a deployment that delivers its runs itself and reads neither; unset or true keeps upstream's hint."""
     cron_config = (_sched.load_config() or {}).get("cron") or {}
-    if is_truthy_value(cron_config.get("silent_marker_hint"), default=True):
+    if is_truthy_value(cron_config.get("marker_hints"), default=True):
         return _CRON_HINT
-    return _CRON_HINT.replace(_CRON_HINT_SILENT, "", 1)
+    hint = _CRON_HINT
+    for part in _CRON_HINT_MARKER_PARTS:
+        hint = hint.replace(part, "", 1)
+    return hint
 
 
 def _build_job_prompt(
