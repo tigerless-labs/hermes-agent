@@ -112,6 +112,10 @@ def _or_default(thunk, default, exc=(TypeError, ValueError)):
 DEFAULT_BUSY_TEXT_DEBOUNCE_SECONDS = 0.35
 DEFAULT_BUSY_TEXT_HARD_CAP_SECONDS = 1.0
 
+# Outbound ``metadata`` key: a caller's tag for the message it sends or edits. A platform that can mark a message
+# with it does (Slack: the first block's ``block_id``), so the caller can tell its own messages apart later.
+MESSAGE_TAG = "message_tag"
+
 
 def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) -> dict | None:
     """Platform-aware thread metadata for adapter sends. Telegram DM topics route with
