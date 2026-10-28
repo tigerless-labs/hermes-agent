@@ -53,6 +53,7 @@ from gateway.platforms.base import (
     is_host_excluded_by_no_proxy, resolve_proxy_url, safe_url_for_log, _ssrf_redirect_guard,
     cache_document_from_bytes_async, cache_video_from_bytes_async, _media_failure_text,
     find_kept_cache_file, get_audio_cache_dir, get_document_cache_dir, get_image_cache_dir, get_video_cache_dir,
+    MESSAGE_TAG,
 )
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 
@@ -2335,7 +2336,8 @@ class SlackAdapter(BasePlatformAdapter):
                 # stay stuck on "is thinking..." (#24117).
                 return SendResult(success=True)
             thread_ts = self._resolve_thread_ts(reply_to, metadata)
-            last_result = await self._post_chunks(chat_id, team_id, content, formatted, thread_ts)
+            last_result = await self._post_chunks(chat_id, team_id, content, formatted, thread_ts,
+                                                  tag=(metadata or {}).get(MESSAGE_TAG))
             # Clear Slack Assistant status as soon as the final message is posted.
             if thread_ts:
                 await self.stop_typing(chat_id, metadata=metadata)
@@ -2397,7 +2399,8 @@ class SlackAdapter(BasePlatformAdapter):
         """A final reply's text (rich, as any reply) and its files as ONE message; a text too long to
         ride along, or an upload that fails, posts the text on its own and its files go into its thread."""
         text = formatted if formatted and formatted.strip() else ""
-        blocks = self._maybe_blocks(content) if text else None
+        tag = (metadata or {}).get(MESSAGE_TAG)
+        blocks = _tagged(self._maybe_blocks(content), tag) if text else None
         rides = _one_message_text(blocks, text, _one_message_max_bytes(self.config.extra))
         sent = None
         if rides is not None:
@@ -2409,7 +2412,7 @@ class SlackAdapter(BasePlatformAdapter):
         else:
             message_id = None
             if text:
-                last_result = await self._post_chunks(chat_id, team_id, content, formatted, thread_ts)
+                last_result = await self._post_chunks(chat_id, team_id, content, formatted, thread_ts, tag=tag)
                 message_id = last_result.get("ts") if last_result else None
             files_sent = await self._send_files_only(chat_id, files, thread_ts or message_id, metadata)
             message_id = message_id or (files_sent or {}).get("message_id")
@@ -2460,7 +2463,8 @@ class SlackAdapter(BasePlatformAdapter):
                                             thread_ts, metadata)
 
     async def _post_chunks(
-        self, chat_id: str, team_id: str, content: str, formatted: str, thread_ts: Optional[str]
+        self, chat_id: str, team_id: str, content: str, formatted: str, thread_ts: Optional[str], *,
+        tag: Optional[str] = None,
     ) -> Any:
         """``chat.postMessage`` each ``MAX_MESSAGE_LENGTH`` chunk; returns the last response.
         Block Kit only for single-chunk messages (a >39k response is pathological for the 50-block /
@@ -2468,7 +2472,7 @@ class SlackAdapter(BasePlatformAdapter):
         ``reply_broadcast`` only the first chunk is also posted to the main channel."""
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         broadcast = self.config.extra.get("reply_broadcast", False)
-        blocks = self._maybe_blocks(content) if len(chunks) == 1 else None
+        blocks = _tagged(self._maybe_blocks(content), tag) if len(chunks) == 1 else None
         last_result = None
         for i, chunk in enumerate(chunks):
             kwargs = {
@@ -2586,9 +2590,11 @@ class SlackAdapter(BasePlatformAdapter):
             update_kwargs: dict[str, Any] = {
                 "channel": chat_id, "ts": message_id, "text": formatted}
             # Block Kit only on the FINAL edit: re-deriving a layout on every streaming flush
-            # would be wasteful and jittery. ``text`` is the fallback either way.
-            if finalize:
-                blocks = self._maybe_blocks(content)
+            # would be wasteful and jittery. ``text`` is the fallback either way. A tagged edit
+            # (``MESSAGE_TAG``) always carries its blocks: the tag rides on the first one.
+            tag = (metadata or {}).get(MESSAGE_TAG)
+            if finalize or tag:
+                blocks = _tagged(self._maybe_blocks(content), tag)
                 if blocks:
                     update_kwargs["blocks"] = blocks
             await self._call_with_block_fallback(
@@ -7225,6 +7231,14 @@ async def _message_ts_of_upload(client, file_obj: Dict[str, Any], chat_id: str) 
     return None
 
 
+def _tagged(blocks: Optional[list], tag: Optional[str]) -> Optional[list]:
+    """``blocks`` with the first one's ``block_id`` set to the caller's ``tag`` (``MESSAGE_TAG``); the renderer
+    never sets one, so only a tagged send or edit carries it. Unchanged without blocks or a tag."""
+    if not blocks or not tag:
+        return blocks
+    return [{**blocks[0], "block_id": tag}, *blocks[1:]]
+
+
 def _one_message_text(blocks: Optional[list], text: str, max_bytes: int) -> Optional[Dict[str, Any]]:
     """How a text rides in the message carrying files: compact Block Kit (no ``initial_comment``, which
     would make Slack drop the blocks) or the plain comment; None when it is too long to ride along."""
@@ -7426,9 +7440,22 @@ async def standalone_fetch_conversation_file(
     return await SlackAdapter.detached(config).fetch_conversation_file(channel_id, reference, team_id)
 
 
+async def standalone_edit_message(pconfig, chat_id: str, message_id: str, content: str, *,
+                                  tag: Optional[str] = None) -> SendResult:
+    """Out-of-process :meth:`SlackAdapter.edit_message` (cron, tools) with the primary bot token the
+    standalone sender uses; a ``tag`` rides on the first block as in the gateway."""
+    raw_token = getattr(pconfig, "token", None) or get_secret("SLACK_BOT_TOKEN", "")
+    tokens = _load_slack_bot_tokens(str(raw_token or ""), quiet=True)
+    if not tokens:
+        return SendResult(success=False, error="SLACK_BOT_TOKEN not configured")
+    config = PlatformConfig(enabled=True, token=tokens[0], extra=dict(getattr(pconfig, "extra", None) or {}))
+    return await SlackAdapter.detached(config).edit_message(
+        chat_id, message_id, content, metadata={MESSAGE_TAG: tag} if tag else None)
+
+
 async def _standalone_send(
     pconfig, chat_id, message, *, thread_id=None, media_files=None, force_document=False,
-    caption=None):
+    caption=None, tag=None):
     """Out-of-process delivery (``standalone_sender_fn``) for cron/tool processes not co-located
     with the gateway: text via ``chat.postMessage`` (aiohttp), media via ``files_upload_v2``."""
     del force_document  # signature parity with other standalone senders
@@ -7465,7 +7492,8 @@ async def _standalone_send(
         extra = getattr(pconfig, "extra", None) or {}
         return await _standalone_send_media(
             token, chat_id, media_files, thread_id, formatted, formatted_caption, unfurl_kwargs,
-            one_message=bool(extra.get("media_in_one_message")), blocks=_standalone_blocks(pconfig, caption or message),
+            one_message=bool(extra.get("media_in_one_message")),
+            blocks=_tagged(_standalone_blocks(pconfig, caption or message), tag),
             max_bytes=_one_message_max_bytes(extra))
     # --- Text-only path (existing aiohttp chat.postMessage) ---
     if not formatted or not formatted.strip():
@@ -7480,7 +7508,8 @@ async def _standalone_send(
         last_error = "unknown"
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30), **_sess_kw) as session:
-            payload = _standalone_post_kwargs(chat_id, formatted, unfurl_kwargs, thread_id)
+            payload = _standalone_post_kwargs(chat_id, formatted, unfurl_kwargs, thread_id,
+                                              _tagged(_standalone_blocks(pconfig, message), tag) if tag else None)
             for tok in tokens:
                 data = await _slack_json_post(session, tok, "chat.postMessage", payload, _req_kw)
                 if data.get("ok"):

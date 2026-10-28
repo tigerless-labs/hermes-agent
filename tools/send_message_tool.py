@@ -272,6 +272,10 @@ def _handle_send(args):
         mentions = args.get("mentions")
         if mentions and platform_name == "whatsapp":
             handler_args["mentions"] = [mentions] if isinstance(mentions, str) else list(mentions)
+        # ``tag`` marks the message for its caller (``MESSAGE_TAG``); only Slack's senders carry it.
+        tag = args.get("tag")
+        if isinstance(tag, str) and tag and platform_name == "slack":
+            handler_args["tag"] = tag
         result = _run_async(_send_to_platform(platform, pconfig, chat_id, cleaned_message, thread_id=thread_id,
                                               media_files=media_files, force_document=force_document_attachments,
                                               **handler_args))
@@ -552,15 +556,17 @@ async def _dispatch_on_gateway_loop(runner, make_coro, log_message):
 
 
 async def _send_via_adapter(platform, pconfig, chat_id, chunk, *, thread_id=None, media_files=None,
-                            force_document=False):
+                            force_document=False, tag=None):
     """Live in-process gateway adapter first, else the plugin's ``standalone_sender_fn`` (cron),
     else an error naming both; media uses the adapter's native media APIs under the same rules."""
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     runner, adapter = _live_adapter(platform)
     if adapter is not None:
         try:
+            from gateway.platforms.base import MESSAGE_TAG
             metadata = {**({"thread_id": thread_id} if thread_id else {}),
-                        **({"publish_topic": chat_id} if platform_name == "ntfy" and chat_id else {})} or None
+                        **({"publish_topic": chat_id} if platform_name == "ntfy" and chat_id else {}),
+                        **({MESSAGE_TAG: tag} if tag else {})} or None
             if media_files:  # always a dict result, returned as-is below
                 make_coro = lambda: _send_live_adapter_media(
                     adapter, chat_id, chunk, media_files, thread_id=thread_id, metadata=metadata,
@@ -589,7 +595,7 @@ async def _send_via_adapter(platform, pconfig, chat_id, chunk, *, thread_id=None
                           f"plugin must register a standalone_sender_fn on its PlatformEntry.")}
     try:
         result = await sender(pconfig, chat_id, chunk, thread_id=thread_id, media_files=media_files,
-                              force_document=force_document)
+                              force_document=force_document, **({"tag": tag} if tag else {}))
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -642,7 +648,7 @@ _PLUGIN_STANDALONE_MEDIA = {"discord": ("Discord", False, True, [], False), "fei
 
 
 async def _send_plugin_standalone(platform_name, pconfig, chat_id, message, chunks, media_files, *, thread_id,
-                                  max_len, force_document, mentions=None):
+                                  max_len, force_document, mentions=None, tag=None):
     """Chunked send through a plugin's standalone_sender_fn; one captionable file + short text
     rides as the media caption. WhatsApp re-pings recipients on every message that carries
     ``mentions``, so only the first payload of a logical send gets them."""
@@ -651,6 +657,8 @@ async def _send_plugin_standalone(platform_name, pconfig, chat_id, message, chun
     if err:
         return err
     extra = {"force_document": force_document} if pass_force else {}
+    if tag:
+        extra["tag"] = tag
     first_only = {"mentions": mentions} if mentions else {}
     if captionable:
         # Cap on the platform's own message limit so the caption is deliverable.
@@ -667,8 +675,8 @@ async def _send_plugin_standalone(platform_name, pconfig, chat_id, message, chun
     return await _send_chunks(chunks, send_one)
 
 
-def _via_adapter_route(p, pc, cid, chunk, media, tid, fd):
-    return _send_via_adapter(p, pc, cid, chunk, thread_id=tid, media_files=media, force_document=fd)
+def _via_adapter_route(p, pc, cid, chunk, media, tid, fd, tag=None):
+    return _send_via_adapter(p, pc, cid, chunk, thread_id=tid, media_files=media, force_document=fd, tag=tag)
 
 
 # Native-media chunked routes for built-in platforms; media rides on the final chunk, non-final
@@ -700,7 +708,7 @@ _MEDIA_PLATFORMS_NOTE = "telegram, discord, matrix, weixin, signal, yuanbao, fei
 
 
 async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None,
-                            force_document=False, mentions=None, args=None):
+                            force_document=False, mentions=None, args=None, tag=None):
     """Route to the platform sender, chunking long text with the adapters' splitter. Order matters:
     Weixin first (its native helper must not be blocked by unrelated optional imports such as
     lark-oapi), Telegram (chunks itself), plugin standalone media, native chunked, generic text."""
@@ -721,12 +729,14 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             or (media_files and platform_name in _PLUGIN_STANDALONE_MEDIA)):
         return await _send_plugin_standalone(platform_name, pconfig, chat_id, message, chunks, media_files,
                                              thread_id=thread_id, max_len=max_len, force_document=force_document,
-                                             mentions=mentions)
+                                             mentions=mentions, tag=tag)
     route = _CHUNKED_ROUTES.get(platform_name)
     if route is not None and (media_files or not route[0]):
         _, empty_media, sender = route
+        tagged = {"tag": tag} if tag else {}
         return await _send_chunks(chunks, lambda chunk, is_last: sender(
-            platform, pconfig, chat_id, chunk, media_files if is_last else empty_media, thread_id, force_document))
+            platform, pconfig, chat_id, chunk, media_files if is_last else empty_media, thread_id, force_document,
+            **tagged))
 
     # --- QQ Bot: native media via REST upload + MSG_TYPE_MEDIA (issue #37315).
     # Guild channels are unsupported for native media (same as QQBotAdapter);
