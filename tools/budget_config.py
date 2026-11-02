@@ -1,7 +1,7 @@
 """Configurable budget constants for tool result persistence.
 Per-tool resolution: pinned > config overrides > registry > default."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict
 
 from agent.model_metadata import CHARS_PER_TOKEN
@@ -52,6 +52,7 @@ class BudgetConfig:
     preview_size: int = DEFAULT_PREVIEW_SIZE_CHARS
     mcp_result_size: int = DEFAULT_MCP_RESULT_SIZE_CHARS
     tool_overrides: dict[str, int] = field(default_factory=dict)
+    inline_tools: frozenset[str] = frozenset()
 
     def resolve_threshold(self, tool_name: str) -> int | float:
         """Priority: pinned -> tool_overrides -> mcp_ prefix -> registry per-tool -> default.
@@ -64,6 +65,8 @@ class BudgetConfig:
         """
         if tool_name in PINNED_THRESHOLDS:
             return PINNED_THRESHOLDS[tool_name]
+        if tool_name in self.inline_tools:
+            return float("inf")
         if tool_name in self.tool_overrides:
             return self.tool_overrides[tool_name]
         if tool_name.startswith(MCP_TOOL_PREFIX):
@@ -103,12 +106,45 @@ def budget_for_context_window(context_length: int | None) -> BudgetConfig:
     mcp_result_size = _configured_mcp_result_size()
     if not context_length or context_length <= 0:
         if mcp_result_size == DEFAULT_MCP_RESULT_SIZE_CHARS:
-            return DEFAULT_BUDGET
-        return BudgetConfig(mcp_result_size=mcp_result_size)
+            return _with_deployment_caps(DEFAULT_BUDGET)
+        return _with_deployment_caps(BudgetConfig(mcp_result_size=mcp_result_size))
     window_chars = context_length * _CHARS_PER_TOKEN
-    return BudgetConfig(
+    return _with_deployment_caps(BudgetConfig(
         default_result_size=max(_MIN_RESULT_SIZE_CHARS, min(int(window_chars * _PER_RESULT_WINDOW_FRACTION), DEFAULT_RESULT_SIZE_CHARS)),
         turn_budget=max(_MIN_TURN_BUDGET_CHARS, min(int(window_chars * _PER_TURN_WINDOW_FRACTION), DEFAULT_TURN_BUDGET_CHARS)),
         preview_size=DEFAULT_PREVIEW_SIZE_CHARS,
         mcp_result_size=mcp_result_size,
+    ))
+
+
+def _positive_chars(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _configured_deployment_caps() -> tuple[int | None, int | None, frozenset[str]]:
+    """``tool_budget.result_size_chars`` / ``turn_budget_chars`` / ``inline_tools`` (fork, Lara): a deployment
+    that keeps its prompts under a price line caps what one result and one batch may carry, below the
+    window-scaled values. Missing, malformed or non-positive values cap nothing."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        data = load_config_readonly()
+        block = data.get("tool_budget") if isinstance(data, dict) else None
+    except Exception:
+        block = None
+    if not isinstance(block, dict):
+        return None, None, frozenset()
+    inline = block.get("inline_tools")
+    inline_tools = frozenset(inline) if isinstance(inline, list) and all(isinstance(n, str) for n in inline) else frozenset()
+    return _positive_chars(block.get("result_size_chars")), _positive_chars(block.get("turn_budget_chars")), inline_tools
+
+
+def _with_deployment_caps(budget: BudgetConfig) -> BudgetConfig:
+    result_cap, turn_cap, inline_tools = _configured_deployment_caps()
+    if result_cap is None and turn_cap is None and not inline_tools:
+        return budget
+    return replace(
+        budget,
+        default_result_size=min(budget.default_result_size, result_cap or budget.default_result_size),
+        turn_budget=min(budget.turn_budget, turn_cap or budget.turn_budget),
+        inline_tools=budget.inline_tools | inline_tools,
     )
