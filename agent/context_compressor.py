@@ -2238,7 +2238,8 @@ class ContextCompressor(
             if self.context_length > 0:
                 budget = min(budget, int(self.context_length * TAIL_MAX_CONTEXT_FRACTION))
             self._tail_token_budget = max(1, budget)
-        return self._tail_token_budget
+        from agent.compaction_tail import calibrated_tail_budget  # Lara fork: compression.tail_budget_real_tokens
+        return calibrated_tail_budget(self, self._tail_token_budget)
 
     @tail_token_budget.setter
     def tail_token_budget(self, value: int) -> None:
@@ -3653,14 +3654,16 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
     def _demote_stale_tail_tools(self, messages: list[dict[str, Any]], tail_start: int) -> list[dict[str, Any]]:
         """Lean mode: demote tail tool results older than the newest ``_LEAN_TAIL_KEEP_TOOL_ROUNDS`` rounds to
         recovery stubs; skill-marker rows untouched. New list (untouched rows shared, demoted copied)."""
+        from agent.compaction_tail import demoted_tail_content, tail_tool_rounds  # Lara fork: compression.tail_*
         session_id = getattr(self, "_session_id", "") or ""
+        keep_rounds = tail_tool_rounds(_LEAN_TAIL_KEEP_TOOL_ROUNDS)
         rounds_seen = 0
         protected: set[int] = set()
         prev_idx = None
         for i in (i for i in range(len(messages) - 1, tail_start - 1, -1) if messages[i].get("role") == "tool"):
             rounds_seen += prev_idx is None or prev_idx - i > 1
             prev_idx = i
-            if rounds_seen > _LEAN_TAIL_KEEP_TOOL_ROUNDS:
+            if rounds_seen > keep_rounds:
                 break
             protected.add(i)
         result = list(messages)
@@ -3672,7 +3675,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                 continue
             if len(content) < _LEAN_TAIL_DEMOTE_MIN_CHARS or SKILL_PRUNED_MARKER_PREFIX in content or _is_summary_stub(content):
                 continue
-            result[i] = _rewritten(msg, _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id))
+            result[i] = _rewritten(msg, demoted_tail_content(
+                msg, _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id)))
             demoted += 1
         if demoted and not self.quiet_mode:
             logger.info("Lean tail: demoted %d stale tool result(s)", demoted)

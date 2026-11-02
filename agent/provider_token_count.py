@@ -62,4 +62,6 @@ def counted_request_pressure(agent: Any, messages: list[dict[str, Any]], api_mes
     counted = _positive_count(counted)
     if counted is not None:
         logger.info("Provider token count: %d tokens in %.0f ms", counted, (time.monotonic() - started) * 1000)
+        from agent.compaction_tail import record_provider_count
+        record_provider_count(agent, counted, api_messages, tools_for_api)
     return counted
