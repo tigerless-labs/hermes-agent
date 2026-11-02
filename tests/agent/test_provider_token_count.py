@@ -199,11 +199,15 @@ def switched_on_with_advisor(tmp_path, monkeypatch):
                "advisor:\n  model: claude-sonnet-5-5\n")
 
 
+LOADED_TOOL = {"type": "function", "function": {"name": "hub_tool", "description": "d",
+                                                "parameters": {"type": "object", "properties": {}}}}
+
+
 def test_the_advisor_the_main_call_carries_is_counted_with_it(switched_on_with_advisor):
     from agent.anthropic_advisor import ADVISOR_BETA, ADVISOR_TOOL_NAME
 
     counter = FakeCounter()
-    _count(_anthropic_agent(counter))
+    _count(_anthropic_agent(counter), tools=[LOADED_TOOL])
     sent = counter.calls[0]
     assert ADVISOR_TOOL_NAME in [tool.get("name") for tool in sent["tools"]]
     assert ADVISOR_BETA in sent["extra_headers"]["anthropic-beta"]
@@ -215,5 +219,5 @@ def test_a_delegated_agent_is_counted_without_the_advisor_as_its_calls_go_out(sw
     counter = FakeCounter()
     agent = _anthropic_agent(counter)
     agent._delegate_depth = 1
-    _count(agent)
+    _count(agent, tools=[LOADED_TOOL])
     assert ADVISOR_TOOL_NAME not in [tool.get("name") for tool in counter.calls[0].get("tools", [])]
