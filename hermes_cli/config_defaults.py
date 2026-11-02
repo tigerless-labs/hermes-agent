@@ -610,6 +610,10 @@ DEFAULT_CONFIG = {
         # preflight/pre-API/idle/retry) reach chat gateways instead of being filtered as noise.
         # Failure notices and manual /compress feedback are always visible.
         "progress_notices": False,
+        # blocked_notices: False keeps the "over threshold but compression is blocked" warning out of chat
+        # surfaces (gateway log only), for deployments whose chat members cannot run /new or /compress.
+        # True keeps upstream's always-visible failure notice.
+        "blocked_notices": True,
         # threshold: compress when context usage exceeds this ratio. Models with windows below 512K
         # are floored at 0.75 (raise-only) so compaction doesn't fire with half the window free; set
         # above 0.75 to override the floor.

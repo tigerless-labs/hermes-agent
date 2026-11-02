@@ -394,8 +394,9 @@ def enforce_turn_budget(tool_messages: list[dict], env=None,
     sizes = [_content_text_size(msg.get("content", "")) for msg in tool_messages]
     total_size = sum(sizes)
     candidates = [(i, size) for i, size in enumerate(sizes)
-                  if isinstance(tool_messages[i].get("content"), list)
-                  or PERSISTED_OUTPUT_TAG not in tool_messages[i].get("content", "")]
+                  if (isinstance(tool_messages[i].get("content"), list)
+                      or PERSISTED_OUTPUT_TAG not in tool_messages[i].get("content", ""))
+                  and tool_messages[i].get("tool_name") not in config.inline_tools]
     if total_size <= config.turn_budget:
         return tool_messages
     for idx, size in sorted(candidates, key=lambda x: x[1], reverse=True):
