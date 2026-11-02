@@ -190,3 +190,30 @@ def test_assembled_request_pressure_keeps_the_estimate_when_nothing_is_counted(s
     assembled, _ = _assemble_and_wire(agent, [{"role": "user", "content": "继续"}])
     assert assembled.request_pressure_tokens == assembled.approx_tokens
     assert agent._request_pressure_anchored is False
+
+
+@pytest.fixture
+def switched_on_with_advisor(tmp_path, monkeypatch):
+    _configure(tmp_path, monkeypatch,
+               "compression:\n  provider_token_count: true\n  provider_token_count_timeout_seconds: 2\n"
+               "advisor:\n  model: claude-sonnet-5-5\n")
+
+
+def test_the_advisor_the_main_call_carries_is_counted_with_it(switched_on_with_advisor):
+    from agent.anthropic_advisor import ADVISOR_BETA, ADVISOR_TOOL_NAME
+
+    counter = FakeCounter()
+    _count(_anthropic_agent(counter))
+    sent = counter.calls[0]
+    assert ADVISOR_TOOL_NAME in [tool.get("name") for tool in sent["tools"]]
+    assert ADVISOR_BETA in sent["extra_headers"]["anthropic-beta"]
+
+
+def test_a_delegated_agent_is_counted_without_the_advisor_as_its_calls_go_out(switched_on_with_advisor):
+    from agent.anthropic_advisor import ADVISOR_TOOL_NAME
+
+    counter = FakeCounter()
+    agent = _anthropic_agent(counter)
+    agent._delegate_depth = 1
+    _count(agent)
+    assert ADVISOR_TOOL_NAME not in [tool.get("name") for tool in counter.calls[0].get("tools", [])]

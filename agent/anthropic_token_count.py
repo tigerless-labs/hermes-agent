@@ -1,7 +1,8 @@
 """Anthropic's count of a request (``messages.count_tokens``) for ``compression.provider_token_count`` (fork, Lara).
 
-The request is built the way the main call builds it (same converters, deferred tools off the wire until loaded)
-without the one-shot settings that belong to the real request; only the fields the count endpoint reads are sent.
+The request is built the way the main call builds it (same converters, deferred tools off the wire until loaded,
+the advisor where the main call carries it) without the one-shot settings that belong to the real request; only
+the fields the count endpoint reads are sent.
 The count is free and rate-limited apart from message creation.
 """
 
@@ -29,5 +30,12 @@ def count_request_tokens(agent: Any, api_messages: list[dict[str, Any]], tools_f
         base_url=getattr(agent, "_anthropic_base_url", None),
         drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)),
     )
+    from agent.anthropic_advisor import advisor_tool, apply_advisor, nudge_turn
+    from hermes_cli.config import load_config_readonly
+
+    config = load_config_readonly()
+    apply_advisor(request, model=agent.model, base_url=getattr(agent, "_anthropic_base_url", None),
+                  is_oauth=bool(agent._is_anthropic_oauth), tool=advisor_tool(config), nudge_turn=nudge_turn(config),
+                  delegated=getattr(agent, "_delegate_depth", 0) > 0)
     fields = {key: request[key] for key in COUNTED_FIELDS if request.get(key) is not None}
     return client.messages.count_tokens(**fields, timeout=timeout).input_tokens
