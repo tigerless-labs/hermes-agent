@@ -614,6 +614,11 @@ DEFAULT_CONFIG = {
         # surfaces (gateway log only), for deployments whose chat members cannot run /new or /compress.
         # True keeps upstream's always-visible failure notice.
         "blocked_notices": True,
+        # provider_token_count: True lets the pre-request pressure check take the provider's own count of the
+        # request (Anthropic messages.count_tokens) whenever the usage anchor does not cover it; providers that
+        # cannot count, errors and timeouts keep the estimate. False keeps upstream's estimate.
+        "provider_token_count": False,
+        "provider_token_count_timeout_seconds": 2,
         # threshold: compress when context usage exceeds this ratio. Models with windows below 512K
         # are floored at 0.75 (raise-only) so compaction doesn't fire with half the window free; set
         # above 0.75 to override the floor.
