@@ -619,6 +619,13 @@ DEFAULT_CONFIG = {
         # cannot count, errors and timeouts keep the estimate. False keeps upstream's estimate.
         "provider_token_count": False,
         "provider_token_count_timeout_seconds": 2,
+        # tail_budget_real_tokens: a real-token cap on the verbatim tail a compaction keeps, converted through the
+        # session's own real-to-estimate ratio from provider counts; null keeps upstream's chars/4 budget.
+        # tail_tool_rounds: newest tool rounds the tail keeps whole (upstream 6). tail_demote_to_file: older long
+        # tail results move to the chat's spill file and leave a path instead of the session_search hint.
+        "tail_budget_real_tokens": None,
+        "tail_tool_rounds": None,
+        "tail_demote_to_file": False,
         # threshold: compress when context usage exceeds this ratio. Models with windows below 512K
         # are floored at 0.75 (raise-only) so compaction doesn't fire with half the window free; set
         # above 0.75 to override the floor.
