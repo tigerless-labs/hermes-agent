@@ -71,6 +71,10 @@ try:
     from .inbound_markdown import slack_mrkdwn_to_markdown
 except ImportError:  # pragma: no cover - plugin loaded outside package context
     from inbound_markdown import slack_mrkdwn_to_markdown  # type: ignore
+try:
+    from .events_socket import SlackEventsSocket
+except ImportError:  # pragma: no cover - plugin loaded outside package context
+    from events_socket import SlackEventsSocket  # type: ignore
 
 
 logger = logging.getLogger(__name__)
@@ -1828,7 +1832,9 @@ class SlackAdapter(BasePlatformAdapter):
         raw_token = self.config.token
         # Scoped read: a secondary profile missing SLACK_APP_TOKEN must not inherit the default's app (#59739).
         app_token = _get_scoped_secret("SLACK_APP_TOKEN")
-        for env_name, value in (("SLACK_BOT_TOKEN", raw_token), ("SLACK_APP_TOKEN", app_token)):
+        events_socket = self._events_socket_path()
+        required = (("SLACK_BOT_TOKEN", raw_token),) + (() if events_socket else (("SLACK_APP_TOKEN", app_token),))
+        for env_name, value in required:
             if not value:
                 self._fatal_missing_env(env_name)
                 return False
@@ -1838,7 +1844,9 @@ class SlackAdapter(BasePlatformAdapter):
         bot_tokens = _load_slack_bot_tokens(raw_token, quiet=False)
         lock_acquired = False
         try:
-            if not self._acquire_platform_lock("slack-app-token", app_token, "Slack app token"):
+            lock = (("slack-events-socket", events_socket, "Slack events socket") if events_socket
+                    else ("slack-app-token", app_token, "Slack app token"))
+            if not self._acquire_platform_lock(*lock):
                 return False
             lock_acquired = True
             self._running = False
@@ -1847,6 +1855,7 @@ class SlackAdapter(BasePlatformAdapter):
             await self._cancel_socket_watchdog("[Slack] Prior watchdog task failed while stopping")
             # A zombie Socket Mode handler would double-respond to every event.
             await self._stop_socket_mode_handler()
+            await self._stop_events_socket()
             await self._close_workspace_clients()
             # Close any previous handler before creating a new one so that calling connect() a second time
             # (e.g. during a gateway restart or in-process reconnect attempt) does not leave a zombie Socket
@@ -1869,17 +1878,23 @@ class SlackAdapter(BasePlatformAdapter):
             # _running=True only once the handler is alive (watchdog needs the live
             # task); on failure keep it False so ``finally`` releases the lock.
             try:
-                self._start_socket_mode_handler()
-                self._running = True
-                self._ensure_socket_watchdog()
+                if events_socket:
+                    self._start_events_socket(events_socket)
+                    self._running = True
+                else:
+                    self._start_socket_mode_handler()
+                    self._running = True
+                    self._ensure_socket_watchdog()
             except Exception:
                 self._running = False
                 try:
                     await self._stop_socket_mode_handler()
+                    await self._stop_events_socket()
                 except Exception:  # pragma: no cover - defensive logging
                     logger.debug("[Slack] Cleanup after failed start raised", exc_info=True)
                 raise
-            logger.info("[Slack] Socket Mode connected (%d workspace(s))", len(self._team_clients))
+            logger.info("[Slack] %s connected (%d workspace(s))",
+                        f"Events socket {events_socket}" if events_socket else "Socket Mode", len(self._team_clients))
             self._hint_allow_bots()
             return True
         except Exception as e:  # pragma: no cover - defensive logging
@@ -1888,6 +1903,19 @@ class SlackAdapter(BasePlatformAdapter):
         finally:
             if lock_acquired and not self._running:
                 self._release_platform_lock()
+
+    def _events_socket_path(self) -> str:
+        """``SLACK_EVENTS_SOCKET`` (fork): payloads come over this local socket instead of Socket Mode."""
+        return str(_extra_or_secret(self.config.extra, "events_socket", "SLACK_EVENTS_SOCKET", "") or "").strip()
+
+    def _start_events_socket(self, path: str) -> None:
+        self._events_socket = SlackEventsSocket(self._app, path, trust_env=gateway_trust_env())
+        self._events_socket.start()
+
+    async def _stop_events_socket(self) -> None:
+        reader, self._events_socket = getattr(self, "_events_socket", None), None
+        if reader is not None:
+            await reader.stop()
 
     def _fatal_missing_env(self, env_name: str) -> None:
         """Log + record the permanent config error for a missing SLACK_* token."""
@@ -1957,6 +1985,7 @@ class SlackAdapter(BasePlatformAdapter):
         for key, stream in list(self._native_task_card_streams.items()):
             await self._stop_native_task_card_stream(key, stream)
         await self._stop_socket_mode_handler()
+        await self._stop_events_socket()
         await self._close_workspace_clients()
         self._app = self._app_token = self._proxy_url = self._bot_user_id = None
         self._team_clients, self._team_bot_user_ids = {}, {}
