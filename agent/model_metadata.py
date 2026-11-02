@@ -2641,6 +2641,10 @@ def _estimate_tools_tokens_rough(tools: list[dict[str, Any]]) -> int:
             continue
         fn = tool.get("function")
         src = fn if isinstance(fn, dict) else tool
+        if src.get("defer_loading") is True:
+            # Off the wire (or parameters-only behind a tool search) until a search loads it (fork, Lara).
+            total_chars += len(src.get("name") or "")
+            continue
         params = src.get("parameters") or {}
         total_chars += sum(len(v) for v in (src.get("name") or "", src.get("description") or "") if isinstance(v, str))
         try:  # JSON is closer to wire size than repr()
