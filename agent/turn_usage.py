@@ -229,7 +229,11 @@ def record_response_usage(
         _agg_cost_model = _agg_slot["model"]
         _agg_cost_provider = _agg_slot.get("provider") or agent.provider
         _agg_cost_base_url = _agg_slot.get("base_url") or agent.base_url
-    cost_result = estimate_usage_cost(
+    from agent.anthropic_advisor import executor_passes_cost  # Lara fork: an advisor request is billed per executor pass
+    cost_result = executor_passes_cost(
+        _agg_cost_model, response.usage, provider=_agg_cost_provider,
+        base_url=_agg_cost_base_url, api_key=getattr(agent, "api_key", ""),
+    ) or estimate_usage_cost(
         _agg_cost_model, aggregator_usage, provider=_agg_cost_provider,
         base_url=_agg_cost_base_url, api_key=getattr(agent, "api_key", ""),
     )
