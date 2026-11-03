@@ -179,7 +179,8 @@ def mark_executor_passes(reply: Any, log_prefix: str = "") -> None:
     if getattr(usage, "initial_prompt_tokens", None) is None:
         usage.initial_prompt_tokens = _pass_prompt(passes[0])
         usage.initial_cached_tokens = passes[0]["cache_read_tokens"]
-    logger.info("%sExecutor passes: prompts=%s", log_prefix, "+".join(str(_pass_prompt(p)) for p in passes))
+    logger.info("%sExecutor passes: in/read/write/out=%s", log_prefix, " ".join(
+        f"{p['input_tokens']}/{p['cache_read_tokens']}/{p['cache_write_tokens']}/{p['output_tokens']}" for p in passes))
 
 
 def executor_passes_cost(model: str, usage: Any, *, provider: Optional[str] = None, base_url: Optional[str] = None,

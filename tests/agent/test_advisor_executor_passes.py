@@ -63,7 +63,10 @@ def test_the_context_engines_read_the_first_pass(caplog):
         account_advisor_usage(reply, AGENT)
     assert reply.usage.initial_prompt_tokens == _prompt(FIRST)
     assert reply.usage.initial_cached_tokens == FIRST["cache_read_input_tokens"]
-    assert any(f"{_prompt(FIRST)}+{_prompt(SECOND)}" in r.getMessage() for r in caplog.records)
+    line = "in/read/write/out=" + " ".join(
+        f"{e['input_tokens']}/{e['cache_read_input_tokens']}/{e['cache_creation_input_tokens']}/{e['output_tokens']}"
+        for e in (FIRST, SECOND))
+    assert any(line in r.getMessage() for r in caplog.records)
 
 
 def test_each_pass_is_priced_at_its_own_length_and_the_costs_add_up():
