@@ -1,7 +1,8 @@
 """``platforms.slack.extra.group_chat_flag``: each admitted message carries the adapter's verdict on
 whether its conversation is a group chat, as ``source.group_chat``, for plugins to tell the
 model. A 1:1 DM never is; a group DM always is. In a channel thread it is when someone besides the
-sender and the bot has spoken in or been @mentioned in the thread (other bots do not count), the same
+sender and the bot has spoken in the thread or been @mentioned there by a person (bots do not count,
+as authors or as mentioners), the same
 people ``thread_reply_judgement`` counts; a top-level message counts only whom it @mentions; a thread
 that cannot be read counts as a group chat. Off, no verdict. Driven through the real
 ``_handle_slack_message``.
@@ -64,8 +65,11 @@ async def _verdict(adapter, event):
     ([_said("1700000000.000030", "I am Lara", user="U_IMPOSTOR")], "and now?", True),
     ([], f"<@{SENDER}> note to self", False),
     ([], f"<@{BOT_USER_ID}> summarize", False),
+    ([_said("1700000000.000030", f"Report ready.\n_Scheduled by <@{OTHER_USER_ID}|Bella>_", user=BOT_USER_ID,
+            bot_id="B_SELF")], "pick another?", False),
 ], ids=["only-sender", "peer-spoke", "peer-mentioned", "here", "user-group", "other-bot-spoke",
-        "other-bot-mentioned", "impostor-display-name", "sender-mentions-self", "bot-mentioned"])
+        "other-bot-mentioned", "impostor-display-name", "sender-mentions-self", "bot-mentioned",
+        "own-post-mentions-peer"])
 async def test_a_channel_thread_is_a_group_chat_once_someone_else_is_in_it(adapter, history, text, group):
     _arm(adapter, history)
     assert await _verdict(adapter, _message(text, "1700000000.000090")) is group

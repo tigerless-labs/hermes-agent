@@ -1,7 +1,7 @@
 """``platforms.slack.extra.thread_reply_judgement``: the bot judges replies in shared threads.
 
-In a thread where someone besides the sender and the bot has spoken or been @mentioned, a message
-that does not @mention the bot may stay silent (``reply_expected`` False); with only the sender and
+In a thread where someone besides the sender and the bot has spoken or been @mentioned by a person, a
+message that does not @mention the bot may stay silent (``reply_expected`` False); with only the sender and
 the bot it must be answered (True). Who is in the thread comes from Slack user ids, seeded once from
 the thread's history and kept current from each admitted message; an unreadable history means the
 message must be answered. The bot's own @mention stays visible so the model can tell, and the
@@ -24,6 +24,10 @@ BOT_REPLY = {"ts": "1700000000.000020", "user": BOT_USER_ID, "bot_id": "B_SELF",
 PEER_REPLY = {"ts": "1700000000.000030", "user": OTHER_USER_ID, "text": "I have the raw file"}
 OTHER_BOT = "U_BOT_OTHER"
 OTHER_BOT_REPLY = {"ts": "1700000000.000040", "user": OTHER_BOT, "bot_id": "B_OTHER", "text": "alert"}
+SIGNED_BOT_POST = {"ts": THREAD, "user": BOT_USER_ID, "bot_id": "B_SELF",
+                   "text": f"No draft this round.\n_Scheduled by <@{OTHER_USER_ID}|Bella>_"}
+OTHER_BOT_PING = {"ts": "1700000000.000050", "user": OTHER_BOT, "bot_id": "B_OTHER",
+                  "text": f"<@{OTHER_USER_ID}> your build failed"}
 
 
 def _message(text, ts, *, user=SENDER, channel=CHANNEL_ID, channel_type="channel", thread_ts=THREAD):
@@ -70,8 +74,11 @@ async def _admit(adapter, event, *, names=None, bots=(OTHER_BOT, BOT_USER_ID)):
     (_history(OTHER_BOT_REPLY), _message("and now?", "2.7"), True),
     ({"messages": [dict(ROOT, user=OTHER_USER_ID)]}, _message("thoughts?", "2.8"), False),
     (_history(), _message(f"and now?\n*Sent using* <@{OTHER_BOT}|Claude>", "2.9"), True),
+    ({"messages": [SIGNED_BOT_POST]}, _message("can you pick another one?", "2.10"), True),
+    (_history(OTHER_BOT_PING), _message("and now?", "2.11"), True),
 ], ids=["only-sender", "peer-spoke", "peer-mentioned", "here", "user-group", "bot-mentioned",
-        "other-bot-spoke", "peer-started-thread", "other-bot-mentioned"])
+        "other-bot-spoke", "peer-started-thread", "other-bot-mentioned", "own-post-mentions-peer",
+        "other-bot-mentions-peer"])
 async def test_a_thread_follow_up_may_go_unanswered_only_with_someone_else_there(
         adapter, history, event, expected):
     _arm(adapter, history=history)

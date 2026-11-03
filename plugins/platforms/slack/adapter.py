@@ -6936,9 +6936,11 @@ class SlackAdapter(BasePlatformAdapter):
     async def _thread_has_others(
         self, *, channel_id: str, thread_ts: str, team_id: str, user_id: str, text: str,
         self_uids: set) -> Optional[bool]:
-        """Whether anyone besides ``user_id`` and the bot spoke in or was @mentioned in the thread;
-        other bots, as authors or as mentions, do not count. Read once from the thread's history,
-        then kept current from each admitted message; None when that history cannot be read."""
+        """Whether anyone besides ``user_id`` and the bot spoke in the thread or was @mentioned there by
+        a person; bots do not count, as authors, as mentions or as mentioners, so whom a bot's own post
+        @mentions (a signature, a ping) is not in the conversation until they speak. Read once from the
+        thread's history, then kept current from each admitted message; None when that history cannot be
+        read."""
         key = self._workspace_thread_key(team_id, channel_id, thread_ts)
         people = self._thread_people.get(key)
         if people is None:
@@ -6952,7 +6954,9 @@ class SlackAdapter(BasePlatformAdapter):
                 return None
             people = set()
             for msg in history.get("messages") or []:
-                if msg.get("user") and not self._event_declares_bot_sender(msg):
+                if self._event_declares_bot_sender(msg):
+                    continue
+                if msg.get("user"):
                     people.add(msg["user"])
                 people |= await self._people_addressed(
                     msg.get("text") or "", channel_id=channel_id, team_id=team_id)
