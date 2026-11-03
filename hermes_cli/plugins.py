@@ -629,6 +629,15 @@ class PluginContext:
             return False
         return (_plugin_settings_entry(cfg, self.plugin_id) or {}).get("allow_gateway_injection") is True
 
+    def interrupt_session(self, *, origin: Mapping[str, Any]) -> bool:
+        """Stop the running turn of the messaging-gateway session at ``origin`` (the shape
+        ``inject_message`` takes) in THIS plugin's own profile, as ``/stop`` does: the turn is
+        interrupted with the stop reason and its queued follow-ups are cleared. Needs
+        ``plugins.entries.<plugin_id>.allow_gateway_interrupt: true`` in the plugin's profile config.
+        ``True`` means a turn was running there and its stop is scheduled; ``False`` changes nothing."""
+        from hermes_cli.plugins_interrupt import interrupt_plugin_session
+        return interrupt_plugin_session(self, origin)
+
     @_serialized_replacement
     def register_cli_command(
         self, name: str, help: str, setup_fn: Callable, handler_fn: Callable | None = None,

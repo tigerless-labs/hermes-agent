@@ -242,3 +242,52 @@ class GatewayPluginInjectionMixin:
             ))
         logger.info("Plugin message injection dispatched: plugin=%s %s session=%s", plugin_id, target, session_key)
         return True
+
+    def _interrupt_plugin_session(
+        self, *, origin: Mapping[str, Any], plugin_home: Optional[Path], plugin_id: str,
+    ) -> bool:
+        """Stop the running turn of the session at a plugin-supplied *origin*
+        (``PluginContext.interrupt_session``), thread-safe. The origin passes the same checks as an
+        injected turn's — the plugin's own profile, its live adapter, the gateway's routing for that
+        chat — so the key is the one an ``inject_message(origin=...)`` turn there runs under.
+        ``True`` when a turn runs there and its stop is scheduled; otherwise nothing changes."""
+        from gateway.run import safe_schedule_threadsafe
+        loop = getattr(self, "_gateway_loop", None)
+        if not getattr(self, "_running", False) or loop is None or loop.is_closed():
+            return False
+        source = self._plugin_origin_source(origin, plugin_home=plugin_home, plugin_id=plugin_id)
+        if source is None:
+            return False
+        session_key = self._session_key_for_source(source)
+        if session_key not in self._running_agents:
+            logger.info("Plugin session interrupt: nothing running: plugin=%s session=%s", plugin_id, session_key)
+            return False
+        future = safe_schedule_threadsafe(
+            self._dispatch_plugin_session_interrupt(session_key=session_key, source=source, plugin_id=plugin_id),
+            loop, logger=logger, log_message="Plugin session interrupt scheduling failed", log_level=logging.WARNING,
+        )
+        if future is None:
+            return False
+
+        def _log_failure(completed) -> None:
+            if not completed.cancelled() and completed.exception() is not None:
+                logger.warning("Plugin session interrupt failed: plugin=%s session=%s", plugin_id, session_key,
+                               exc_info=completed.exception())
+
+        future.add_done_callback(_log_failure)
+        return True
+
+    async def _dispatch_plugin_session_interrupt(
+        self, *, session_key: str, source: SessionSource, plugin_id: str
+    ) -> bool:
+        """``/stop`` for one session: hard interrupt with the stop reason, its queued follow-ups
+        cleared and its slot released, in the session's profile scope."""
+        from gateway.run import _INTERRUPT_REASON_STOP
+        if session_key not in self._running_agents:
+            return False
+        async with self._plugin_injection_scope(source):
+            await self._interrupt_and_clear_session(
+                session_key, source, interrupt_reason=_INTERRUPT_REASON_STOP, invalidation_reason="plugin_stop",
+            )
+        logger.info("Plugin session interrupt: plugin=%s session=%s stopped", plugin_id, session_key)
+        return True
