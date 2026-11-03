@@ -626,6 +626,13 @@ DEFAULT_CONFIG = {
         "tail_budget_real_tokens": None,
         "tail_tool_rounds": None,
         "tail_demote_to_file": False,
+        # tail_demote_tool_inputs: older long tool-call arguments in the tail move to the chat's file too.
+        # tail_skill_tools / tail_skill_tokens / tail_skills_total_tokens: skill bodies in the tail keep their newest
+        # copy, each and all together capped (real tokens), oldest dropped first, as Claude Code re-injects them.
+        "tail_demote_tool_inputs": False,
+        "tail_skill_tools": [],
+        "tail_skill_tokens": None,
+        "tail_skills_total_tokens": None,
         # threshold: compress when context usage exceeds this ratio. Models with windows below 512K
         # are floored at 0.75 (raise-only) so compaction doesn't fire with half the window free; set
         # above 0.75 to override the floor.
