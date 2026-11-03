@@ -104,6 +104,7 @@ Every `ctx.*` API below is available inside a plugin's `register(ctx)` function.
 | Dispatch tools from commands | `ctx.dispatch_tool(name, args)` — invokes a registered tool with parent-agent context auto-wired |
 | Add CLI commands | `ctx.register_cli_command(name, help, setup_fn, handler_fn)` — adds `hermes <plugin> <subcommand>` |
 | Inject messages | `ctx.inject_message(content, role="user", session_key=... \| origin=...)` - see [Injecting Messages](#injecting-messages) |
+| Stop a gateway turn | `ctx.interrupt_session(origin=...)` - see [Stopping a gateway turn](#stopping-a-gateway-turn) |
 | Ship data files | `Path(__file__).parent / "data" / "file.yaml"` |
 | Bundle skills | `ctx.register_skill(name, path)` — namespaced as `plugin:skill`, loaded via `skill_view("plugin:skill")` |
 | Gate on env vars | `requires_env: [API_KEY]` in plugin.yaml — prompted during `hermes plugins install` |
@@ -975,6 +976,31 @@ Only grant gateway injection to plugins you trust. Hermes checks this host API p
 :::note
 This plugin API does not expose a public HTTP endpoint or CLI command for external processes. The plugin must already know the target gateway `session_key`, for example from its own trusted configuration or previously retained session state.
 :::
+
+## Stopping a gateway turn
+
+`ctx.interrupt_session(origin=...)` stops the running turn of the gateway session at a chat/thread, the way `/stop` does there: the turn is interrupted with the stop reason and the follow-ups queued behind it are cleared. Use it, for example, for a Stop button the plugin posts next to work it started with `ctx.inject_message(origin=...)`.
+
+```python
+stopped = ctx.interrupt_session(origin={
+    "platform": "slack", "chat_id": "D0123456789", "chat_type": "dm",
+    "thread_id": "1730000000.000100", "user_id": "U0123456789",
+})
+```
+
+**Signature:** `ctx.interrupt_session(*, origin: Mapping[str, Any]) -> bool`
+
+- `origin` takes the same shape and the same checks as `inject_message(origin=...)`, so it names the session an injected turn there runs in, and only in **the plugin's own profile**: another profile's sessions are unreachable.
+- Returns `True` when a turn is running in that session and its stop is scheduled on the gateway loop; safe to call from any thread. Returns `False`, and changes nothing, when nothing runs there, the origin is refused, the permission is not granted, or no live gateway is running.
+
+Disabled by default for every plugin. Grant it per plugin in the plugin's own profile `config.yaml`:
+
+```yaml
+plugins:
+  entries:
+    my-plugin:
+      allow_gateway_interrupt: true
+```
 
 ## Calling MCP servers from plugins
 
