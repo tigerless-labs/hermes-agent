@@ -3680,7 +3680,9 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             demoted += 1
         if demoted and not self.quiet_mode:
             logger.info("Lean tail: demoted %d stale tool result(s)", demoted)
-        return result
+        from agent.compaction_tail import demote_tail_inputs_and_skills  # Lara fork: compression.tail_*
+        return demote_tail_inputs_and_skills(self, result, tail_start, {messages[i].get("tool_call_id") for i in protected},
+                                             _LEAN_TAIL_DEMOTE_MIN_CHARS)
 
     def _augment_summary_lean(self, summary: str, turns_to_summarize: list[dict[str, Any]]) -> str:
         """Append deterministic lean-mode sections to a summary; no-op in legacy mode."""
@@ -5581,6 +5583,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         if pruned_count and not self.quiet_mode:
             logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
         messages = self._drop_blank_echoes(messages)
+        from agent.compaction_tail import demote_before_measuring  # Lara fork: compression.tail_demote_to_file
+        if demote_before_measuring() and getattr(self, "tail_mode", "lean") == "lean":
+            messages = self._demote_stale_tail_tools(messages, self._protect_head_size(messages))
         n_messages = len(messages)
         # Phase 2: Determine boundaries (on the pruned copy so a pressure-demoted tail can compress, #61932)
         compress_start, compress_end = self._compress_window(messages)
