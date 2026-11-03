@@ -2675,6 +2675,9 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     for c in cands:
         if c and c in agent.valid_tool_names:
             return c
+    from agent.tool_name_repair import fuzzy_repair_allowed, namespaced_spellings  # Lara fork: agent.tool_name_fuzzy_repair
+    if not fuzzy_repair_allowed():
+        return next((c for c in namespaced_spellings(cands) if c in agent.valid_tool_names), None)
     matches = get_close_matches(lowered, agent.valid_tool_names, n=1, cutoff=0.7)
     return matches[0] if matches else None
 

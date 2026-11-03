@@ -76,6 +76,10 @@ DEFAULT_CONFIG = {
         # Turn cap. null = unlimited (default; caps caused silent mid-task truncation). Positive int
         # caps; "none"/"unlimited"/"inf"/0/-1 also mean unlimited (resolve_turn_limit).
         "max_turns": None,
+        # tool_name_fuzzy_repair: False repairs an unknown tool name only to spellings of the same name (case,
+        # separators, CamelCase, a _tool suffix, <platform>.<tool>), never to the nearest different tool.
+        # True keeps upstream's fuzzy match.
+        "tool_name_fuzzy_repair": True,
         # Optional one-time model-visible checkpoint warning before a finite turn cap is exhausted.
         # null = off; set a ratio strictly between 0 and 1 (for example, 0.75).
         "budget_warning_ratio": None,
