@@ -142,9 +142,68 @@ def _logged_as(session_id: Optional[str]) -> Iterator[None]:
         hermes_logging.set_session_context(previous)
 
 
+EXECUTOR_ITERATION = "message"
+PASS_FIELDS = {"input_tokens": "input_tokens", "output_tokens": "output_tokens",
+               "cache_read_input_tokens": "cache_read_tokens", "cache_creation_input_tokens": "cache_write_tokens"}
+
+
+def _executor_passes(usage: Any) -> list[dict]:
+    """The executor passes of an advisor request, or [] when the breakdown is absent, single or malformed."""
+    passes = []
+    for iteration in getattr(usage, "iterations", None) or []:
+        data = iteration if isinstance(iteration, dict) else getattr(iteration, "__dict__", None)
+        if not isinstance(data, dict):
+            return []
+        if data.get("type") != EXECUTOR_ITERATION:
+            continue
+        counts = {name: data.get(field, 0) for field, name in PASS_FIELDS.items()}
+        if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in counts.values()) \
+                or "input_tokens" not in data:
+            return []
+        passes.append(counts)
+    return passes if len(passes) > 1 else []
+
+
+def _pass_prompt(executor_pass: dict) -> int:
+    return executor_pass["input_tokens"] + executor_pass["cache_read_tokens"] + executor_pass["cache_write_tokens"]
+
+
+def mark_executor_passes(reply: Any, log_prefix: str = "") -> None:
+    """Expose an advisor request's executor passes: the context engines read the first pass (the request built from
+    the transcript, via the field Gemini's long decode uses) and pricing reads each pass."""
+    usage = getattr(reply, "usage", None)
+    passes = _executor_passes(usage)
+    if not passes:
+        return
+    usage.executor_passes = passes
+    if getattr(usage, "initial_prompt_tokens", None) is None:
+        usage.initial_prompt_tokens = _pass_prompt(passes[0])
+        usage.initial_cached_tokens = passes[0]["cache_read_tokens"]
+    logger.info("%sExecutor passes: prompts=%s", log_prefix, "+".join(str(_pass_prompt(p)) for p in passes))
+
+
+def executor_passes_cost(model: str, usage: Any, *, provider: Optional[str] = None, base_url: Optional[str] = None,
+                         api_key: Optional[str] = None) -> Any:
+    """Each executor pass priced at its own length, summed; None when the request has no passes to price."""
+    from dataclasses import replace
+    from decimal import Decimal
+
+    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+    passes = getattr(usage, "executor_passes", None)
+    if not passes:
+        return None
+    priced = [estimate_usage_cost(model, CanonicalUsage(**p), provider=provider, base_url=base_url, api_key=api_key)
+              for p in passes]
+    if any(result.amount_usd is None for result in priced):
+        return None
+    return replace(priced[0], amount_usd=sum((result.amount_usd for result in priced), Decimal(0)))
+
+
 def account_advisor_usage(reply: Any, agent: Any) -> None:
     """Log each advisor call the reply carries and record it in the agent's session usage."""
     session_id = getattr(agent, "session_id", None)
+    with _logged_as(session_id):
+        mark_executor_passes(reply, getattr(agent, "log_prefix", ""))
     log_advisor_usage(reply, getattr(agent, "log_prefix", ""), session_id)
     _record_advisor_usage(reply, getattr(agent, "_session_db", None), session_id,
                           getattr(agent, "_anthropic_base_url", None))
