@@ -339,6 +339,15 @@ def slack_deps_present() -> bool:
 _TASK_CHUNK_TEXT_LIMIT = 256
 
 
+def _task_card_duration(seconds: float) -> str:
+    """``12s``, ``1m 15s``, ``1h 2m``: the largest two units that fit."""
+    hours, rest = divmod(max(0, int(seconds)), 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m {secs}s" if minutes else f"{secs}s"
+
+
 @dataclass
 class _NativeTaskCardStream:
     """Serialized state for one workspace-scoped Slack progress stream."""
@@ -349,6 +358,7 @@ class _NativeTaskCardStream:
     stream_ts: str = ""
     stopped: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    last_tasks: list[dict[str, Any]] = field(default_factory=list)
 
 
 def check_slack_requirements() -> bool:
@@ -2139,6 +2149,14 @@ class SlackAdapter(BasePlatformAdapter):
         extra = self.config.extra if isinstance(self.config.extra, dict) else {}
         return str(extra.get("task_card_failure_label") or "")
 
+    def native_task_card_final_title(self, seconds: float, *, stopped: bool) -> str:
+        """Title the card ends with: ``extra.task_card_stopped_title`` after ``stop``, else
+        ``extra.task_card_done_title``; ``{duration}`` reads the turn's length. Unset: the card keeps its
+        working title, as upstream."""
+        extra = self.config.extra if isinstance(self.config.extra, dict) else {}
+        template = str(extra.get("task_card_stopped_title" if stopped else "task_card_done_title") or "")
+        return template.replace("{duration}", _task_card_duration(seconds))[:_TASK_CHUNK_TEXT_LIMIT]
+
     def native_task_card_compaction_title(self) -> str:
         """Title of the task a context compaction shows on the card when ``extra.task_card_compaction_title`` is
         set; unset: compaction stays off the card."""
@@ -2151,6 +2169,32 @@ class SlackAdapter(BasePlatformAdapter):
         config = getattr(self, "config", None)
         extra = config.extra if config is not None and isinstance(config.extra, dict) else {}
         return self._truthy_config(extra.get("mention_user_ids", False))
+
+    def native_task_card_replaces_sealed(self) -> bool:
+        """``extra.task_card_replace_sealed``: a card Slack sealed during the turn leaves no copy titled as
+        working. Sealed mid-turn: deleted once its reopened card is up. Sealed before the end: reopened with the
+        end title and its last tasks, then deleted."""
+        extra = self.config.extra if isinstance(self.config.extra, dict) else {}
+        return self._truthy_config(extra.get("task_card_replace_sealed", False))
+
+    async def _delete_sealed_task_card(self, client, channel: str, sealed_ts: str) -> None:
+        if not (sealed_ts and self.native_task_card_replaces_sealed()):
+            return
+        try:
+            await client.api_call("chat.delete", json={"channel": channel, "ts": sealed_ts})
+        except Exception as exc:
+            logger.info("[Slack] Sealed task card %s not deleted: %s", sealed_ts, exc)
+
+    async def _end_sealed_task_card_anew(
+        self, client, stream: "_NativeTaskCardStream", title_chunk: dict[str, Any],
+        metadata: Optional[dict[str, Any]]) -> None:
+        sealed_ts = stream.stream_ts
+        logger.info("[Slack] Native task-card stream %s sealed before its end; reopening it to end titled", sealed_ts)
+        stream.stream_ts = ""
+        await self._start_native_task_card_stream(client, stream, metadata)
+        await client.api_call("chat.stopStream", json={
+            "channel": stream.channel, "ts": stream.stream_ts, "chunks": [title_chunk, *stream.last_tasks]})
+        await self._delete_sealed_task_card(client, stream.channel, sealed_ts)
 
     def native_task_card_closes_open_tasks(self) -> bool:
         """``extra.task_card_close_open_tasks``: a task still running when the card ends goes out closed."""
@@ -2214,6 +2258,7 @@ class SlackAdapter(BasePlatformAdapter):
                 try:
                     await client.api_call(
                         "chat.appendStream", json={"channel": chat_id, "ts": stream.stream_ts, "chunks": chunks})
+                    stream.last_tasks = chunks[1:]
                 except Exception as exc:
                     if not _slack_error_is(exc, "message_not_in_streaming_state"):
                         raise
@@ -2227,10 +2272,13 @@ class SlackAdapter(BasePlatformAdapter):
                     logger.info(
                         "[Slack] Native task-card stream %s expired (message_not_in_streaming_state); "
                         "reopening a fresh card in thread %s", stream.stream_ts, stream.thread_ts)
+                    sealed_ts = stream.stream_ts
                     stream.stream_ts = ""
                     await self._start_native_task_card_stream(client, stream, metadata)
                     await client.api_call(
                         "chat.appendStream", json={"channel": chat_id, "ts": stream.stream_ts, "chunks": chunks})
+                    stream.last_tasks = chunks[1:]
+                    await self._delete_sealed_task_card(client, chat_id, sealed_ts)
                 return SendResult(success=True, message_id=stream.stream_ts)
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.error("[Slack] Native task-card progress error: %s", exc, exc_info=True)
@@ -2269,15 +2317,25 @@ class SlackAdapter(BasePlatformAdapter):
             "status": status}
 
     async def _stop_native_task_card_stream(
-        self, key: tuple[str, str, str], stream: _NativeTaskCardStream) -> None:
+        self, key: tuple[str, str, str], stream: _NativeTaskCardStream, title: str = "",
+        metadata: Optional[dict[str, Any]] = None) -> None:
         async with stream.lock:
             if stream.stopped:
                 return
             stream.stopped = True
+            payload: dict[str, Any] = {"channel": stream.channel, "ts": stream.stream_ts}
+            if title:
+                payload["chunks"] = [{"type": "plan_update", "title": title[:_TASK_CHUNK_TEXT_LIMIT]}]
             try:
                 if self._app and stream.stream_ts:
-                    await self._get_client(stream.channel, team_id=stream.team_id).api_call(
-                        "chat.stopStream", json={"channel": stream.channel, "ts": stream.stream_ts})
+                    client = self._get_client(stream.channel, team_id=stream.team_id)
+                    try:
+                        await client.api_call("chat.stopStream", json=payload)
+                    except Exception as exc:
+                        if not (title and _slack_error_is(exc, "message_not_in_streaming_state")
+                                and self.native_task_card_replaces_sealed()):
+                            raise
+                        await self._end_sealed_task_card_anew(client, stream, payload["chunks"][0], metadata)
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.debug("[Slack] Native task-card stopStream failed: %s", exc)
             finally:
@@ -2286,14 +2344,14 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def stop_native_task_card_progress(
         self, chat_id: str, *, reply_to: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None) -> None:
-        """Finalize an active Slack-native progress stream exactly once."""
+        metadata: Optional[dict[str, Any]] = None, title: str = "") -> None:
+        """Finalize an active Slack-native progress stream exactly once; a ``title`` replaces the plan's."""
         key = self._native_task_card_key(chat_id, reply_to, metadata)
         if key is None:
             return
         stream = self._native_task_card_streams.get(key)
         if stream is not None:
-            await self._stop_native_task_card_stream(key, stream)
+            await self._stop_native_task_card_stream(key, stream, title, metadata)
 
     def _suppressed_ignored(self, chat_id: str, what: str, *, level: int = logging.WARNING) -> bool:
         """True (after logging) when ``chat_id`` is a configured ignored channel."""
