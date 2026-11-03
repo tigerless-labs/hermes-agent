@@ -460,6 +460,11 @@ platforms:
       # task_card_done_title: "Worked for {duration}"
       # task_card_stopped_title: "Stopped after {duration}"
 
+      # Leave no copy of a card titled as working when Slack seals its stream
+      # during a long turn: delete it once the reopened card is up, or reopen it
+      # with the end title when the seal lands before the end.
+      task_card_replace_sealed: false
+
       # Collapse approved command prompts to a single line.
       collapse_resolved_approvals: false
 
@@ -513,6 +518,7 @@ platforms:
 | `platforms.slack.extra.task_card_compaction_title` | unset | When set, an automatic context compaction is one task with this title on the card, from its first progress line until it completes, the way a tool is; an attempt that ends in a compression warning (refused, failed) ends the task as failed. A turn that only compacts shows the card too. Unset keeps compaction off the card. |
 | `platforms.slack.extra.task_card_close_open_tasks` | `false` | When `true`, a task still running when its card ends goes out closed before the card is finalized: as an error after `/stop`, else complete. Upstream finalizes the card with that task in progress, and Slack keeps spinning it. |
 | `platforms.slack.extra.task_card_done_title` / `task_card_stopped_title` | unset | When set, the card's header is replaced as the card ends: the done title after a finished turn, the stopped title after `/stop`. `{duration}` reads the turn's length (`12s`, `1m 15s`, `1h 2m`). Unset keeps the working header on a finished card, as upstream, which ends the stream without a final `plan_update`. |
+| `platforms.slack.extra.task_card_replace_sealed` | `false` | Slack seals a card's stream during a long turn. Upstream then reopens a fresh card on the next update and leaves the sealed one in the thread with its working header. When `true`, the sealed card is deleted once the fresh card carries the whole projection. A seal that lands after the last update, with an end title set, reopens the card with that title and the last tasks, then deletes the sealed one. The sealed card is kept whenever its replacement fails to land. |
 | `platforms.slack.extra.collapse_resolved_approvals` | `false` | When `true`, an approved command prompt is rewritten to one context line naming the decision and a truncated command. Denied and expired prompts keep their full text. |
 | `platforms.slack.extra.clarify_choices_in_text` | `false` | When `true`, a clarify prompt lists each choice's full text under its number and each choice button shows only that number. Slack renders a button on one line and cuts a long label off, so a long choice is otherwise unreadable. A resolved or retired card keeps the question and the chosen text. |
 | `platforms.slack.extra.media_in_one_message` | `false` | When `true`, a reply and a send from outside the gateway (cron, tools) post one message carrying their text and up to 10 files: the text as the same Block Kit a reply gets, or plain when `rich_blocks` is off. What does not fit goes into that message's thread (or stays in the thread the send was made in): further files ten at a time, or all the files when the text is longer than `one_message_max_bytes`. Answers with that message's ts. |
