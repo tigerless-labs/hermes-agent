@@ -527,6 +527,15 @@ class TurnRunner:
         except Exception:
             logger.debug("task-card close of open tasks failed during turn cleanup", exc_info=True)
 
+    def _task_card_final_title(self, adapter, started: float) -> dict[str, str]:
+        """``extra.task_card_done_title`` / ``extra.task_card_stopped_title``: the card ends titled with how the
+        turn ended and how long it took. An adapter without final titles is stopped as upstream stops it."""
+        final_title = getattr(adapter, "native_task_card_final_title", None)
+        if not callable(final_title):
+            return {}
+        title = final_title(time.monotonic() - started, stopped=self._agent_interrupted())
+        return {"title": title} if isinstance(title, str) and title else {}
+
     async def _send_native_task_card_progress(self, adapter) -> None:
         """Drain progress into native cards; supported destinations retain editable fallback.
         Unsupported destinations and egress refusals suppress publication, never finalization.
@@ -535,6 +544,7 @@ class TurnRunner:
         """
         ctx = self._ctx
         st = self._TaskCardState(adapter)
+        started = time.monotonic()
         try:
             while ctx._run_still_current():
                 try:
@@ -555,6 +565,7 @@ class TurnRunner:
                 try:
                     await adapter.stop_native_task_card_progress(
                         ctx.source.chat_id, reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata,
+                        **self._task_card_final_title(adapter, started),
                     )
                 except asyncio.CancelledError:
                     raise

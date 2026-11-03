@@ -339,6 +339,15 @@ def slack_deps_present() -> bool:
 _TASK_CHUNK_TEXT_LIMIT = 256
 
 
+def _task_card_duration(seconds: float) -> str:
+    """``12s``, ``1m 15s``, ``1h 2m``: the largest two units that fit."""
+    hours, rest = divmod(max(0, int(seconds)), 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m {secs}s" if minutes else f"{secs}s"
+
+
 @dataclass
 class _NativeTaskCardStream:
     """Serialized state for one workspace-scoped Slack progress stream."""
@@ -2139,6 +2148,14 @@ class SlackAdapter(BasePlatformAdapter):
         extra = self.config.extra if isinstance(self.config.extra, dict) else {}
         return str(extra.get("task_card_failure_label") or "")
 
+    def native_task_card_final_title(self, seconds: float, *, stopped: bool) -> str:
+        """Title the card ends with: ``extra.task_card_stopped_title`` after ``stop``, else
+        ``extra.task_card_done_title``; ``{duration}`` reads the turn's length. Unset: the card keeps its
+        working title, as upstream."""
+        extra = self.config.extra if isinstance(self.config.extra, dict) else {}
+        template = str(extra.get("task_card_stopped_title" if stopped else "task_card_done_title") or "")
+        return template.replace("{duration}", _task_card_duration(seconds))[:_TASK_CHUNK_TEXT_LIMIT]
+
     def native_task_card_compaction_title(self) -> str:
         """Title of the task a context compaction shows on the card when ``extra.task_card_compaction_title`` is
         set; unset: compaction stays off the card."""
@@ -2269,15 +2286,18 @@ class SlackAdapter(BasePlatformAdapter):
             "status": status}
 
     async def _stop_native_task_card_stream(
-        self, key: tuple[str, str, str], stream: _NativeTaskCardStream) -> None:
+        self, key: tuple[str, str, str], stream: _NativeTaskCardStream, title: str = "") -> None:
         async with stream.lock:
             if stream.stopped:
                 return
             stream.stopped = True
+            payload: dict[str, Any] = {"channel": stream.channel, "ts": stream.stream_ts}
+            if title:
+                payload["chunks"] = [{"type": "plan_update", "title": title[:_TASK_CHUNK_TEXT_LIMIT]}]
             try:
                 if self._app and stream.stream_ts:
                     await self._get_client(stream.channel, team_id=stream.team_id).api_call(
-                        "chat.stopStream", json={"channel": stream.channel, "ts": stream.stream_ts})
+                        "chat.stopStream", json=payload)
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.debug("[Slack] Native task-card stopStream failed: %s", exc)
             finally:
@@ -2286,14 +2306,14 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def stop_native_task_card_progress(
         self, chat_id: str, *, reply_to: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None) -> None:
-        """Finalize an active Slack-native progress stream exactly once."""
+        metadata: Optional[dict[str, Any]] = None, title: str = "") -> None:
+        """Finalize an active Slack-native progress stream exactly once; a ``title`` replaces the plan's."""
         key = self._native_task_card_key(chat_id, reply_to, metadata)
         if key is None:
             return
         stream = self._native_task_card_streams.get(key)
         if stream is not None:
-            await self._stop_native_task_card_stream(key, stream)
+            await self._stop_native_task_card_stream(key, stream, title)
 
     def _suppressed_ignored(self, chat_id: str, what: str, *, level: int = logging.WARNING) -> bool:
         """True (after logging) when ``chat_id`` is a configured ignored channel."""
