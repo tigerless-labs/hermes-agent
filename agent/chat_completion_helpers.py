@@ -3756,7 +3756,8 @@ class _StreamingCall(StreamingWaitMonitor):
         from agent.anthropic_advisor import account_advisor_usage, resume_paused
         reply = self._call_anthropic(request_client)
         account_advisor_usage(reply, self.agent)
-        return resume_paused(lambda kwargs: self._resume_paused_anthropic(request_client, kwargs), self.api_kwargs, reply)
+        return resume_paused(lambda kwargs: self._resume_paused_anthropic(request_client, kwargs), self.api_kwargs, reply,
+                             self.agent)
 
     def _resume_paused_anthropic(self, request_client, kwargs):
         from agent.anthropic_advisor import account_advisor_usage

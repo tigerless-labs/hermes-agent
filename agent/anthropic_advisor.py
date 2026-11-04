@@ -4,7 +4,8 @@ The executor model consults a stronger advisor model inside the same Messages re
 ``advisor.model`` is configured; only on the native Anthropic API-key route and for Claude executors.
 The advisor's result is opaque (encrypted for newer advisors) and replays verbatim in its place,
 because the thinking blocks after it are signed against it. A request can end with ``pause_turn``
-while the advisor is still working; it is resent with the partial reply until the advisor answers.
+while the advisor is still working; it is resent with the partial reply until the advisor answers. Each part is its
+own billed request, so the joined reply is accounted as every part's executor passes.
 The advisor's tokens are not in the request's top-level usage, so each advisor call is logged on its own line
 and recorded as its own row of the session's usage, on the advisor's model under the ``advisor`` task.
 """
@@ -114,8 +115,8 @@ def _wire_blocks(blocks: list[Any]) -> list[dict]:
     return [clean for b in blocks if (clean := _sanitize_replay_block(_to_plain_data(b))) is not None]
 
 
-def resume_paused(send: Callable[[dict], Any], kwargs: dict, reply: Any) -> Any:
-    """Resend a turn the advisor paused, with the partial reply, until it ends; join the parts."""
+def resume_paused(send: Callable[[dict], Any], kwargs: dict, reply: Any, agent: Any = None) -> Any:
+    """Resend a turn the advisor paused, with the partial reply, until it ends; join the parts and their accounting."""
     tool = advisor_in(kwargs)
     if tool is None or getattr(reply, "stop_reason", None) != PAUSED:
         return reply
@@ -126,6 +127,7 @@ def resume_paused(send: Callable[[dict], Any], kwargs: dict, reply: Any) -> Any:
                                                   {"role": "assistant", "content": _wire_blocks(partial)}]}))
     final = parts[-1]
     final.content = [b for part in parts for b in part.content]
+    _join_part_usage(parts, agent)
     return final
 
 
@@ -157,11 +159,48 @@ def _executor_passes(usage: Any) -> list[dict]:
         if data.get("type") != EXECUTOR_ITERATION:
             continue
         counts = {name: data.get(field, 0) for field, name in PASS_FIELDS.items()}
-        if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in counts.values()) \
-                or "input_tokens" not in data:
+        if not all(_counted(v) for v in counts.values()) or "input_tokens" not in data:
             return []
         passes.append(counts)
     return passes if len(passes) > 1 else []
+
+
+def _counted(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _part_passes(usage: Any) -> Optional[list[dict]]:
+    """A resumed request's part as executor passes: its breakdown when it has several, else its own counts as one
+    pass; None when its usage cannot be read."""
+    passes = getattr(usage, "executor_passes", None) or _executor_passes(usage)
+    if passes:
+        return passes
+    counts = {name: getattr(usage, field, None) for field, name in PASS_FIELDS.items()}
+    counts["cache_read_tokens"] = counts["cache_read_tokens"] or 0
+    counts["cache_write_tokens"] = counts["cache_write_tokens"] or 0
+    return [counts] if all(_counted(v) for v in counts.values()) else None
+
+
+def _join_part_usage(parts: list[Any], agent: Any) -> None:
+    """Account a resumed request as all of its parts: every part's executor passes and their summed counts, the first
+    part's first pass as the context; a part whose usage cannot be read leaves the last part accounted alone."""
+    per_part = [_part_passes(getattr(part, "usage", None)) for part in parts]
+    if any(part_passes is None for part_passes in per_part):
+        return
+    passes = [executor_pass for part_passes in per_part for executor_pass in part_passes]
+    usage = parts[-1].usage
+    for field, name in PASS_FIELDS.items():
+        setattr(usage, field, sum(executor_pass[name] for executor_pass in passes))
+    usage.executor_passes = passes
+    usage.initial_prompt_tokens = _pass_prompt(passes[0])
+    usage.initial_cached_tokens = passes[0]["cache_read_tokens"]
+    with _logged_as(getattr(agent, "session_id", None)):
+        _log_passes(passes, getattr(agent, "log_prefix", ""))
+
+
+def _log_passes(passes: list[dict], log_prefix: str) -> None:
+    logger.info("%sExecutor passes: in/read/write/out=%s", log_prefix, " ".join(
+        f"{p['input_tokens']}/{p['cache_read_tokens']}/{p['cache_write_tokens']}/{p['output_tokens']}" for p in passes))
 
 
 def _pass_prompt(executor_pass: dict) -> int:
@@ -179,8 +218,7 @@ def mark_executor_passes(reply: Any, log_prefix: str = "") -> None:
     if getattr(usage, "initial_prompt_tokens", None) is None:
         usage.initial_prompt_tokens = _pass_prompt(passes[0])
         usage.initial_cached_tokens = passes[0]["cache_read_tokens"]
-    logger.info("%sExecutor passes: in/read/write/out=%s", log_prefix, " ".join(
-        f"{p['input_tokens']}/{p['cache_read_tokens']}/{p['cache_write_tokens']}/{p['output_tokens']}" for p in passes))
+    _log_passes(passes, log_prefix)
 
 
 def executor_passes_cost(model: str, usage: Any, *, provider: Optional[str] = None, base_url: Optional[str] = None,

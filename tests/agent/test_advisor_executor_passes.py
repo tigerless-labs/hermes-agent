@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.anthropic_advisor import account_advisor_usage, executor_passes_cost
+from agent.anthropic_advisor import PAUSED, account_advisor_usage, advisor_tool, executor_passes_cost, resume_paused
 from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
 MODEL, ADVISOR = "claude-haiku-5-5", "claude-sonnet-5-5"
@@ -33,7 +33,7 @@ def _prompt(entry: dict) -> int:
     return entry["input_tokens"] + entry["cache_read_input_tokens"] + entry["cache_creation_input_tokens"]
 
 
-def _reply(iterations: list[dict] | None) -> SimpleNamespace:
+def _reply(iterations: list[dict] | None, stop_reason: str = "end_turn") -> SimpleNamespace:
     passes = [e for e in iterations or [FIRST] if e["type"] == "message"]
     usage = SimpleNamespace(input_tokens=sum(e["input_tokens"] for e in passes),
                             cache_read_input_tokens=sum(e["cache_read_input_tokens"] for e in passes),
@@ -41,7 +41,7 @@ def _reply(iterations: list[dict] | None) -> SimpleNamespace:
                             output_tokens=sum(e["output_tokens"] for e in passes))
     if iterations is not None:
         usage.iterations = iterations
-    return SimpleNamespace(usage=usage, content=[], id=None, model=MODEL, stop_reason="end_turn")
+    return SimpleNamespace(usage=usage, content=[], id=None, model=MODEL, stop_reason=stop_reason)
 
 
 def _canonical(entry: dict) -> CanonicalUsage:
@@ -137,3 +137,85 @@ def test_the_recorded_cost_and_the_compressor_follow_the_passes(tmp_path, monkey
     assert seen["prompt_tokens"] == _prompt(FIRST)
     expected = _cost(_canonical(FIRST)) + _cost(_canonical(SECOND))
     assert agent.session_estimated_cost_usd - before == pytest.approx(float(expected))
+
+
+THIRD = {"type": "message", "input_tokens": 512, "cache_read_input_tokens": 68_336, "cache_creation_input_tokens": 1_024,
+         "output_tokens": 640}
+KWARGS = {"messages": [{"role": "user", "content": "how many new orders?"}],
+          "tools": [advisor_tool({"advisor": {"model": ADVISOR, "max_uses": 2}})]}
+
+
+def _resumed(first_part: SimpleNamespace, *later_parts: SimpleNamespace) -> SimpleNamespace:
+    pending = list(later_parts)
+
+    def send(_kwargs):
+        part = pending.pop(0)
+        account_advisor_usage(part, AGENT)
+        return part
+
+    account_advisor_usage(first_part, AGENT)
+    return resume_paused(send, KWARGS, first_part, AGENT)
+
+
+def _passes_cost(*entries: dict) -> Decimal:
+    return sum((_cost(_canonical(e)) for e in entries), Decimal(0))
+
+
+def test_every_part_of_a_resumed_request_is_priced_and_the_costs_add_up():
+    joined = _resumed(_reply([FIRST, ADVICE], PAUSED), _reply([SECOND]))
+    assert executor_passes_cost(MODEL, joined.usage, provider="anthropic").amount_usd == _passes_cost(FIRST, SECOND)
+
+
+def test_a_resumed_part_with_its_own_passes_keeps_each_of_them():
+    joined = _resumed(_reply([FIRST, ADVICE], PAUSED), _reply([SECOND, ADVICE, THIRD]))
+    assert executor_passes_cost(MODEL, joined.usage, provider="anthropic").amount_usd == _passes_cost(FIRST, SECOND, THIRD)
+
+
+def test_a_resumed_request_counts_every_part_and_reads_the_first_part_as_its_context():
+    joined = _resumed(_reply([FIRST, ADVICE], PAUSED), _reply([SECOND, ADVICE, THIRD]))
+    for wire in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"):
+        assert getattr(joined.usage, wire) == sum(e[wire] for e in (FIRST, SECOND, THIRD))
+    assert joined.usage.initial_prompt_tokens == _prompt(FIRST)
+    assert joined.usage.initial_cached_tokens == FIRST["cache_read_input_tokens"]
+
+
+def test_the_joined_passes_are_logged_last_for_the_golden_split(caplog):
+    with caplog.at_level(logging.INFO):
+        _resumed(_reply([FIRST, ADVICE], PAUSED), _reply([SECOND]))
+    lines = [r.getMessage() for r in caplog.records if "Executor passes" in r.getMessage()]
+    assert lines[-1].endswith(" ".join(
+        f"{e['input_tokens']}/{e['cache_read_input_tokens']}/{e['cache_creation_input_tokens']}/{e['output_tokens']}"
+        for e in (FIRST, SECOND)))
+
+
+@pytest.mark.parametrize("broken", ["missing input", "non-numeric", "no usage"])
+def test_redteam_a_part_whose_usage_cannot_be_read_leaves_the_last_part_accounted_alone(broken):
+    first = _reply([FIRST, ADVICE], PAUSED)
+    if broken == "missing input":
+        del first.usage.input_tokens
+    elif broken == "non-numeric":
+        first.usage.output_tokens = "lots"
+    else:
+        first.usage = None
+    last = _reply([SECOND])
+    before = vars(last.usage).copy()
+    joined = _resumed(first, last)
+    assert vars(joined.usage) == before
+    assert executor_passes_cost(MODEL, joined.usage, provider="anthropic") is None
+
+
+def test_the_recorded_cost_of_a_resumed_request_covers_every_part(tmp_path, monkeypatch):
+    from agent import turn_usage
+
+    agent = _anthropic_agent(tmp_path, monkeypatch)
+    seen = {}
+    monkeypatch.setattr(agent.context_compressor, "update_from_response", lambda usage: seen.update(usage))
+    joined = _resumed(_reply([FIRST, ADVICE], PAUSED), _reply([SECOND]))
+    before = agent.session_estimated_cost_usd
+    try:
+        turn_usage.record_response_usage(agent, joined, messages=[{"role": "user", "content": "hi"}], api_call_count=1,
+                                         api_duration=0.2, compression_attempts=0, max_compression_attempts=3)
+    finally:
+        agent.close()
+    assert seen["prompt_tokens"] == _prompt(FIRST)
+    assert agent.session_estimated_cost_usd - before == pytest.approx(float(_passes_cost(FIRST, SECOND)))

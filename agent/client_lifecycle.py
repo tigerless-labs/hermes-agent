@@ -1046,7 +1046,7 @@ class ClientLifecycleMixin:
             )
             account_advisor_usage(reply, self)
             return reply
-        return resume_paused(send, api_kwargs, send(api_kwargs))
+        return resume_paused(send, api_kwargs, send(api_kwargs), self)
 
     def _rebuild_anthropic_client(self) -> None:
         """Rebuild the Anthropic client after an interrupt/stale call (Bedrock SDK for bedrock; honors 1M-beta flag)."""
