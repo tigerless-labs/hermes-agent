@@ -1126,6 +1126,10 @@ class TestWhenToSave:
         from tools.memory_tool import _build_memory_schema_overrides
         return _build_memory_schema_overrides()["description"]
 
+    def test_the_setting_is_a_known_config_key(self):
+        from hermes_cli.config import _validate_config_key
+        assert _validate_config_key("memory.when_to_save")[0]
+
     def test_upstream_description_still_holds_the_paragraph_it_swaps(self):
         from tools.memory_tool import MEMORY_SCHEMA, WHEN_TO_SAVE
         assert MEMORY_SCHEMA["description"].count(WHEN_TO_SAVE) == 1

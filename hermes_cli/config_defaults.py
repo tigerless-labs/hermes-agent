@@ -1385,6 +1385,9 @@ DEFAULT_CONFIG = {
         # true = the unattended background review may also replace/remove entries, applied directly
         # like a foreground write; false stages them for /memory approval (#105921).
         "background_review_edits": False,
+        # Text that replaces the memory tool description's WHEN paragraph, for a deployment that keeps
+        # ways of working with tools other than skill_manage; empty keeps upstream's paragraph.
+        "when_to_save": "",
         "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
         # Periodic built-in memory review; 0 when an external provider auto-extracts.
