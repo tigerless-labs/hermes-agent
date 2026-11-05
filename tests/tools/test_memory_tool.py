@@ -1111,3 +1111,46 @@ class TestBackgroundReviewEdits:
         result = _as_unattended_review(action="remove", old_text="config fails", store=store)
         assert result["staged"] is True
         assert "entry kept when config fails" in store._entries_for("memory")
+
+
+class TestWhenToSave:
+    """``memory.when_to_save`` swaps the description's WHEN paragraph for the operator's text, for a
+    deployment whose tools for keeping a way of working are not ``skill_manage``; everything else in
+    the description and the parameters stays upstream's."""
+
+    GUIDANCE = "WHEN: a way of doing some work goes into that work's skill with hub__skill_update."
+
+    @staticmethod
+    def _described(monkeypatch, section):
+        _memory_config(monkeypatch, section)
+        from tools.memory_tool import _build_memory_schema_overrides
+        return _build_memory_schema_overrides()["description"]
+
+    def test_upstream_description_still_holds_the_paragraph_it_swaps(self):
+        from tools.memory_tool import MEMORY_SCHEMA, WHEN_TO_SAVE
+        assert MEMORY_SCHEMA["description"].count(WHEN_TO_SAVE) == 1
+
+    def test_configured_text_takes_the_when_paragraphs_place_and_nothing_else_changes(self, monkeypatch):
+        from tools.memory_tool import MEMORY_SCHEMA, WHEN_TO_SAVE
+        described = self._described(monkeypatch, {"when_to_save": self.GUIDANCE})
+        assert described == MEMORY_SCHEMA["description"].replace(WHEN_TO_SAVE, self.GUIDANCE)
+        assert "skill_manage" not in described
+
+    def test_narrowed_target_text_still_applies_with_the_configured_paragraph(self, monkeypatch):
+        described = self._described(monkeypatch, {"when_to_save": self.GUIDANCE, "user_profile_enabled": False})
+        assert self.GUIDANCE in described and "TARGET: only 'memory'" in described
+
+    @pytest.mark.parametrize("section", [{}, None, {"when_to_save": ""}, {"when_to_save": "   "},
+                                         {"when_to_save": 3}, {"when_to_save": ["WHEN: x"]},
+                                         {"when_to_save": {"text": "WHEN: x"}}])
+    def test_unset_or_unusable_setting_keeps_upstreams_description(self, monkeypatch, section):
+        from tools.memory_tool import MEMORY_SCHEMA
+        assert self._described(monkeypatch, section) == MEMORY_SCHEMA["description"]
+
+    def test_unreadable_config_keeps_upstreams_description(self, monkeypatch):
+        from tools.memory_tool import MEMORY_SCHEMA, _build_memory_schema_overrides
+
+        def _boom():
+            raise RuntimeError("config unreadable")
+        monkeypatch.setattr("hermes_cli.config.load_config_readonly", _boom)
+        assert _build_memory_schema_overrides()["description"] == MEMORY_SCHEMA["description"]
