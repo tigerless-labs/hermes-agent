@@ -480,6 +480,23 @@ MEMORY_SCHEMA = {
 }
 
 
+# Upstream's WHEN paragraph, swapped for ``memory.when_to_save`` when a deployment keeps ways of
+# working with tools other than ``skill_manage``.
+WHEN_TO_SAVE = (
+    "WHEN: only for facts that apply to EVERY session regardless of task: who the user "
+    "is, stable environment facts, standing conventions with no task home. Anything "
+    "learned while doing a task (procedures, pitfalls, and the user's preferences and "
+    "corrections for that kind of work) belongs in the task's skill via skill_manage, "
+    "where it loads only when relevant; memory is injected into every turn and must "
+    "stay small.")
+
+
+def _configured_when_to_save() -> Optional[str]:
+    """The operator's WHEN paragraph, or None (upstream's) when unset, blank, not text or unreadable."""
+    text = get_builtin_memory_config().get("when_to_save")
+    return text.strip() if isinstance(text, str) and text.strip() else None
+
+
 # Schema text when only one built-in store is enabled: (target description, TARGETS replacement).
 _SINGLE_TARGET_TEXT = {
     ("memory",): ("The enabled built-in store: 'memory' for personal notes.",
@@ -502,6 +519,8 @@ def _build_memory_schema_overrides() -> dict[str, Any]:
         description = description.replace(
             "TARGETS: 'user' = who the user is (name, role, preferences, style). 'memory' = your "
             "notes (environment, conventions, tool quirks, lessons).", replacement)
+    if when_to_save := _configured_when_to_save():
+        description = description.replace(WHEN_TO_SAVE, when_to_save)
     return {"description": description, "parameters": parameters}
 
 
