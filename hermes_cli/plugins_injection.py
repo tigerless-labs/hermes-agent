@@ -11,7 +11,7 @@ logger = logging.getLogger("hermes_cli.plugins")
 
 def inject_plugin_message(
     ctx: Any, content: str, role: str, *, session_key: Optional[str],
-    origin: Optional[Mapping[str, Any]],
+    origin: Optional[Mapping[str, Any]], background: bool = False,
 ) -> bool:
     manager = ctx._manager
     msg = content if role == "user" else f"[{role}] {content}"
@@ -35,6 +35,14 @@ def inject_plugin_message(
                        "plugins.entries.%s.allow_gateway_injection: true to allow it",
                        ctx.plugin_id, ctx.plugin_id)
         return False
+    if background and origin is None:
+        logger.warning("inject_message: background needs an origin")
+        return False
+    if background and not ctx._background_injection_allowed():
+        logger.warning("inject_message: background injection denied for plugin %s; set "
+                       "plugins.entries.%s.allow_background_injection: true to allow it",
+                       ctx.plugin_id, ctx.plugin_id)
+        return False
     # TUI/desktop host is a different slot. It accepts only when it owns this
     # session_key; a miss falls through so a co-resident messaging gateway
     # still receives its own keys. An exception fails closed — do not also
@@ -55,6 +63,8 @@ def inject_plugin_message(
         # The manager's immutable home is the plugin's profile: the gateway creates the session
         # there or nowhere (never the ambient HERMES_HOME of whatever thread called us).
         target = {"origin": dict(origin), "plugin_home": manager.home_path}
+        if background:
+            target["background"] = True
     try:
         return bool(manager.inject_gateway_message(**target, content=msg, plugin_id=ctx.plugin_id))
     except Exception:

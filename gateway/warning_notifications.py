@@ -55,6 +55,9 @@ def diagnostic_turn_muted(display_metadata, platform, user_config=None) -> bool:
 
 def diagnostic_wake_muted(event, user_config=None) -> bool:
     """Only trusted diagnostic-only wakes can mute a turn, never human content."""
+    from gateway.background_turn import background_event
+    if background_event(event):
+        return True
     snapshot = getattr(event, "_notification_reply_muted", None)
     if isinstance(snapshot, bool):
         return snapshot

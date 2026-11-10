@@ -273,7 +273,8 @@ def _db_flush_collect(agent, messages: list[dict], conversation_history: Optiona
         ) and not msg.get(_PERSIST_AFTER_ADMISSION_INTERRUPT):
             msg[_DB_PERSISTED_MARKER] = True
             continue
-        if getattr(agent, "_mute_notification_reply", False) and not is_history:
+        if (getattr(agent, "_mute_notification_reply", False) and not getattr(agent, "_background_turn", False)
+                and not is_history):
             # Only new rows, never the cached history prefix. Keep evidence/model
             # context intact while transcript pollers omit unsolicited presentation.
             msg["display_kind"] = "hidden"

@@ -602,7 +602,7 @@ class PluginContext:
     # manager's home, never the active profile's (#65593 constraint).
     def inject_message(
         self, content: str, role: str = "user", *, session_key: str | None = None,
-        origin: Mapping[str, Any] | None = None,
+        origin: Mapping[str, Any] | None = None, background: bool = False,
     ) -> bool:
         """Inject a message into a CLI, Ink TUI/desktop, or messaging-gateway conversation.
 
@@ -615,9 +615,15 @@ class PluginContext:
         target another profile. Non-CLI injection needs ``session_key`` or ``origin`` plus
         ``plugins.entries.<plugin_id>.allow_gateway_injection`` in the plugin's profile config.
         ``True`` means a host accepted the request, not that the turn completed.
+
+        ``background=True`` (with ``origin`` only) runs the turn without sending anything of it to
+        the platform: no reply, streaming, progress, typing or notices; the turn is recorded as
+        usual and what the person should see is the plugin's to send. It also needs
+        ``plugins.entries.<plugin_id>.allow_background_injection``.
         """
         from hermes_cli.plugins_injection import inject_plugin_message
-        return inject_plugin_message(self, content, role, session_key=session_key, origin=origin)
+        return inject_plugin_message(self, content, role, session_key=session_key, origin=origin,
+                                     background=background)
 
     def _gateway_injection_allowed(self) -> bool:
         """Return whether this plugin may trigger gateway session turns (read from the plugin's
@@ -628,6 +634,15 @@ class PluginContext:
         except Exception:
             return False
         return (_plugin_settings_entry(cfg, self.plugin_id) or {}).get("allow_gateway_injection") is True
+
+    def _background_injection_allowed(self) -> bool:
+        """Return whether this plugin may run gateway turns that send nothing to the platform."""
+        try:
+            with _plugin_home_scope(self._manager.home_path):
+                cfg = load_config_readonly() or {}
+        except Exception:
+            return False
+        return (_plugin_settings_entry(cfg, self.plugin_id) or {}).get("allow_background_injection") is True
 
     def interrupt_session(self, *, origin: Mapping[str, Any]) -> bool:
         """Stop the running turn of the messaging-gateway session at ``origin`` (the shape
