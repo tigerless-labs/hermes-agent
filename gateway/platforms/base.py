@@ -4624,6 +4624,9 @@ class BasePlatformAdapter(ABC):
         # A scheduled heartbeat is proactive work: no typing indicator until it has something to say.
         if not getattr(self.config, "typing_indicator", True) or getattr(event, "_heartbeat_session_id", None):
             return None
+        from gateway.background_turn import background_event
+        if background_event(event):
+            return None
         kwargs: dict[str, Any] = {"metadata": metadata}
         if self._accepts_kwarg(self._keep_typing, "stop_event", var_kw=False, unknown=True):
             kwargs["stop_event"] = interrupt_event

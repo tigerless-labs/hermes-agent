@@ -28,6 +28,7 @@ from gateway.platforms.event import MessageEvent
 from gateway.response_filters import (
     display_kind_for_event, is_machinery_display_kind, reply_expected_metadata, silence_allowed,
 )
+from gateway.background_turn import background_metadata, background_turn, enter_turn, handling_background_turn
 from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted
 from gateway.interim_scope import interim_allowed
 from gateway.session import (
@@ -559,7 +560,7 @@ class GatewayTurnMixin:
         turn_sidecar_notes.append(context_note)
 
         try:
-            should_notify = reset_reason == "suspended"
+            should_notify = reset_reason == "suspended" and not handling_background_turn()
             adapter = self._delivery_adapter_for(source) if should_notify else None
             if adapter:
                 notice = t("gateway.session.auto_reset_notice")
@@ -901,6 +902,8 @@ class GatewayTurnMixin:
 
     async def _hmwa_hygiene_notify(self, source, meta, message, what):
         """Best-effort user notice on the hygiene thread; failure is logged, never raised."""
+        if handling_background_turn():
+            return
         try:
             _adapter = self._delivery_adapter_for(source)
             if _adapter and source.chat_id:
@@ -2143,6 +2146,7 @@ class GatewayTurnMixin:
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
+        enter_turn(event)
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         logger.info(
@@ -2207,7 +2211,8 @@ class GatewayTurnMixin:
                 reply_expected=event.reply_expected,
                 persist_user_display_metadata={
                     "gateway_input_owner": prepared.persistence_owner,
-                    **reply_expected_metadata(event.reply_expected), **diagnostic_metadata(event)},
+                    **reply_expected_metadata(event.reply_expected), **diagnostic_metadata(event),
+                    **background_metadata(event)},
                 message_type=event.message_type,
                 scheduled_heartbeat=bool(getattr(event, "_heartbeat_session_id", None)),
             )
@@ -3105,7 +3110,8 @@ class GatewayTurnMixin:
         )
         turn_runner = TurnRunner(self, turn_ctx)
         turn_ctx.mute_notification_reply = diagnostic_turn_muted(
-            turn_ctx.persist_user_display_metadata, source.platform, turn_ctx.user_config)
+            turn_ctx.persist_user_display_metadata, source.platform, turn_ctx.user_config
+        ) or background_turn(turn_ctx.persist_user_display_metadata)
         # Agent tool-lifecycle callbacks live on the runner (bound methods, same signatures).
         turn_ctx.progress_callback = turn_runner.progress_callback
         turn_ctx.voice_ack_callback = turn_runner.voice_ack_callback
@@ -3976,7 +3982,8 @@ class GatewayTurnMixin:
                 persist_user_display_kind=next_display_kind,
                 reply_expected=next_reply_expected,
                 persist_user_display_metadata={
-                    **reply_expected_metadata(next_reply_expected), **diagnostic_metadata(pending_event)} or None,
+                    **reply_expected_metadata(next_reply_expected), **diagnostic_metadata(pending_event),
+                    **background_metadata(pending_event)} or None,
             )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(

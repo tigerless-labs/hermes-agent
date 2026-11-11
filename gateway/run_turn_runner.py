@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from agent.i18n import t
 from agent.interrupt_compat import _accepts_keyword
 from agent.replay_cleanup import canonicalize_replay_history
+from gateway.background_turn import background_turn
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter
@@ -957,7 +958,7 @@ class TurnRunner:
         from gateway.run import _prepare_gateway_status_message, _redact_gateway_user_facing_secrets, _send_or_update_status_coro
         from gateway.warning_notifications import is_warning_status, render_notification
         ctx = self._ctx
-        if ctx._native_slack_task_cards:
+        if ctx._native_slack_task_cards and not background_turn(getattr(ctx, "persist_user_display_metadata", None)):
             self._native_compaction_task(event_type, message)
         if ctx.mute_notification_reply or not self._status_live():
             return
@@ -1789,6 +1790,7 @@ class TurnRunner:
             # Read by the reply-required stop gate (agent.reply_required_nudge): only a message the
             # adapter marked as addressed must be answered.
             agent._reply_required = ctx.reply_expected is True
+            agent._background_turn = background_turn(ctx.persist_user_display_metadata)
             from agent.notification_presentation import notification_turn
             with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""):
                 return agent.run_conversation(api_message, **kwargs)

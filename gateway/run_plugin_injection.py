@@ -16,6 +16,7 @@ import weakref
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from gateway.background_turn import BACKGROUND_TURN
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.session import SessionSource
 
@@ -38,6 +39,7 @@ class GatewayPluginInjectionMixin:
     def _schedule_plugin_message_injection(
         self, *, content: str, plugin_id: str, session_key: Optional[str] = None,
         origin: Optional[Mapping[str, Any]] = None, plugin_home: Optional[Path] = None,
+        background: bool = False,
     ) -> bool:
         """Schedule a plugin-triggered turn on the live gateway loop (thread-safe).
 
@@ -53,7 +55,8 @@ class GatewayPluginInjectionMixin:
             if source is None:
                 return False
             target = f"origin={source.platform.value}/{source.chat_id}"
-            coro = self._dispatch_plugin_origin_injection(source=source, content=content, plugin_id=plugin_id)
+            coro = self._dispatch_plugin_origin_injection(source=source, content=content, plugin_id=plugin_id,
+                                                          background=background)
         else:
             target = f"session={session_key}"
             coro = self._dispatch_plugin_message_injection(
@@ -216,7 +219,7 @@ class GatewayPluginInjectionMixin:
         return source
 
     async def _dispatch_plugin_origin_injection(
-        self, *, source: SessionSource, content: str, plugin_id: str
+        self, *, source: SessionSource, content: str, plugin_id: str, background: bool = False,
     ) -> bool:
         """Start (or continue) the session at a plugin-supplied origin through the adapter's normal
         message path: ``get_or_create_session`` creates it, the reply goes back to that chat."""
@@ -238,6 +241,7 @@ class GatewayPluginInjectionMixin:
                 metadata={
                     "hermes_plugin_id": plugin_id, "hermes_plugin_injection": True,
                     "gateway_session_key": session_key,
+                    **({BACKGROUND_TURN: True} if background else {}),
                 },
             ))
         logger.info("Plugin message injection dispatched: plugin=%s %s session=%s", plugin_id, target, session_key)
