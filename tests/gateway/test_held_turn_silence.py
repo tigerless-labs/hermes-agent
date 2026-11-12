@@ -4,6 +4,7 @@ The agent result of a held turn carries the hold; with it, the silence marker of
 to the bot is not replaced by the unexpected-silence notice. A marker the model wrote itself on
 such a turn still gets the notice.
 """
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -13,6 +14,7 @@ import gateway.run as gateway_run
 from agent import turn_hold
 from gateway.config import GatewayConfig
 from gateway.response_filters import is_intentional_silence_response
+from tests.gateway.test_busy_steer_reply_expected import SYSTEM_KEY, SYSTEM_SOURCE, _system_runner
 from tests.gateway.test_gateway_silence_tokens import _event, _runner, _source
 
 SESSION_KEY = "agent:main:telegram:group:-1001:12345"
@@ -78,3 +80,29 @@ async def test_redteam_a_queued_marker_that_is_not_held_still_gets_the_notice():
     await runner._run_agent_deliver_first_response(_queued_turn(), None, result, result, None)
     delivered = runner._deliver_queued_first_response.await_args.args[0]
     assert delivered and not is_intentional_silence_response(delivered)
+
+
+class _HeldAgent:
+    held = True
+
+    def __init__(self, **kwargs):
+        self.tools = []
+        self._pending_steer = None
+        self._active_children = []
+        self._active_children_lock = threading.Lock()
+
+    def run_conversation(self, message, conversation_history=None, task_id=None, **kwargs):
+        hold = {turn_hold.RESULT_KEY: True} if type(self).held else {}
+        return {"final_response": turn_hold.HELD_REPLY, "messages": [], "api_calls": 1, "completed": True, **hold}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held", [True, False], ids=["held", "the-model-s-own-marker"])
+async def test_the_hold_on_the_agents_result_reaches_the_gateways_own_result(monkeypatch, tmp_path, held):
+    runner, adapter = _system_runner(monkeypatch, tmp_path, _HeldAgent)
+    _HeldAgent.held = held
+    result = await runner._run_agent(
+        message="@bot send the report", context_prompt="", history=[], source=SYSTEM_SOURCE,
+        session_id="sess-held", session_key=SYSTEM_KEY, reply_expected=True)
+    assert turn_hold.held(result) is held
+    assert not any(content and not is_intentional_silence_response(content) for content in adapter.sent)
