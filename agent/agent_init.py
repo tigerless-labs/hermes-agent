@@ -532,6 +532,7 @@ _CONTROL_STATE: dict[str, Any] = {
     "_trim_after_tool_batch": False,  # a >=1 MB tool result was committed; trim once the batch unwinds
     "_tool_guardrails": ToolCallGuardrailController,
     "_tool_guardrail_halt_decision": None,
+    "_turn_held": False,  # this turn ended held for a person (agent.turn_hold)
     # Interrupts. Hard cancellation is separate from redirect/message state; the Event makes
     # the cause atomic for auxiliary stream pollers.
     "_interrupt_requested": False,

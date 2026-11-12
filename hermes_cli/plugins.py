@@ -653,6 +653,17 @@ class PluginContext:
         from hermes_cli.plugins_interrupt import interrupt_plugin_session
         return interrupt_plugin_session(self, origin)
 
+    def hold_turn(self, session_id: str) -> bool:
+        """From inside a tool handler, hold the running turn of ``session_id`` (the id the handler
+        was called with) for a person's answer: the round's other calls still run, then the turn
+        ends with no further model call and no reply, and its result carries ``held``. What the
+        person should see (a card, a link) is the plugin's to send, and so is starting the turn
+        that carries on. A subagent's turn is not held. Needs
+        ``plugins.entries.<plugin_id>.allow_turn_hold: true`` in the plugin's profile config.
+        ``True`` means the hold was asked for; ``False`` changes nothing."""
+        from hermes_cli.plugins_turn_hold import hold_plugin_turn
+        return hold_plugin_turn(self, session_id)
+
     @_serialized_replacement
     def register_cli_command(
         self, name: str, help: str, setup_fn: Callable, handler_fn: Callable | None = None,

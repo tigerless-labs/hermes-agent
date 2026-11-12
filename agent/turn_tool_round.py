@@ -192,6 +192,15 @@ def run_tool_round(
                     agent.stream_delta_callback(None)
         return _verdict("break")
 
+    from agent import turn_hold
+
+    if turn_hold.take(agent):
+        _turn_exit_reason = turn_hold.EXIT_REASON
+        final_response = turn_hold.HELD_REPLY
+        agent._turn_held = True
+        append_message(messages, {"role": "assistant", "content": final_response})
+        return _verdict("break")
+
     # Reset per-turn retry counters so one truncation can't poison the turn.
     truncated_tool_call_retries = 0
     # Defer the paragraph break: _fire_stream_delta() prepends one "\n\n" when real

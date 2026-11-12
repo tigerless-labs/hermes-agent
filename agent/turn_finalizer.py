@@ -732,6 +732,9 @@ def finalize_turn(
     }
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
+    if getattr(agent, "_turn_held", False):
+        from agent.turn_hold import RESULT_KEY as _HELD_KEY
+        result[_HELD_KEY] = True
     # Persistence failures already set failed=True; also stamp `error` so the gateway
     # surfaces status="error" (desktop can toast) instead of a quiet complete frame, plus
     # the machine-readable cause 'session_persistence_failed:<locked|compression|...>'.
