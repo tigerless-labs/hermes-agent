@@ -295,3 +295,67 @@ class GatewayPluginInjectionMixin:
             )
         logger.info("Plugin session interrupt: plugin=%s session=%s stopped", plugin_id, session_key)
         return True
+
+    PLUGIN_STEER_WAIT_SECONDS = 5.0
+
+    def _steer_plugin_session(
+        self, *, origin: Mapping[str, Any], content: str, plugin_home: Optional[Path], plugin_id: str,
+    ) -> bool:
+        """Give the running turn of the session at a plugin-supplied *origin*
+        (``PluginContext.steer_session``) *content* as a mid-turn message, only when that turn acts for
+        the origin's own sender. The origin passes the same checks as an injected turn's, so the key is
+        the one an ``inject_message(origin=...)`` turn there runs under. Called off the gateway loop: it
+        waits for the turn's answer. ``True`` when the running turn took it; otherwise nothing changes."""
+        from gateway.run import safe_schedule_threadsafe
+        loop = getattr(self, "_gateway_loop", None)
+        if not getattr(self, "_running", False) or loop is None or loop.is_closed() or not content.strip():
+            return False
+        try:
+            on_loop = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            on_loop = False
+        if on_loop:
+            logger.warning("Plugin session steer called on the gateway loop: plugin=%s", plugin_id)
+            return False
+        source = self._plugin_origin_source(origin, plugin_home=plugin_home, plugin_id=plugin_id)
+        if source is None:
+            return False
+        session_key = self._session_key_for_source(source)
+        future = safe_schedule_threadsafe(
+            self._dispatch_plugin_session_steer(session_key=session_key, source=source, content=content,
+                                                plugin_id=plugin_id),
+            loop, logger=logger, log_message="Plugin session steer scheduling failed", log_level=logging.WARNING,
+        )
+        if future is None:
+            return False
+        try:
+            return bool(future.result(timeout=self.PLUGIN_STEER_WAIT_SECONDS))
+        except Exception:
+            future.cancel()
+            logger.warning("Plugin session steer failed: plugin=%s session=%s", plugin_id, session_key,
+                           exc_info=True)
+            return False
+
+    async def _dispatch_plugin_session_steer(
+        self, *, session_key: str, source: SessionSource, content: str, plugin_id: str
+    ) -> bool:
+        """Steer the session's running turn with *content* when that turn acts for *source*'s sender."""
+        from gateway.run import _AGENT_PENDING_SENTINEL
+        from gateway.steer_sender import same_sender
+        text = content.strip()
+        state = self._peek_session_state(session_key)
+        turn = state.turn if state is not None else None
+        agent = getattr(turn, "agent", None)
+        ctx = getattr(turn, "ctx", None)
+        holder = getattr(ctx, "agent_holder", None) or [None]
+        live = agent is not None and agent is not _AGENT_PENDING_SENTINEL and callable(getattr(agent, "steer", None))
+        if not text or not live or holder[0] is not agent:
+            logger.info("Plugin session steer: nothing running: plugin=%s session=%s", plugin_id, session_key)
+            return False
+        if not same_sender(getattr(ctx, "source", None), source):
+            logger.warning("Plugin session steer refused: the running turn acts for someone else: plugin=%s "
+                           "session=%s", plugin_id, session_key)
+            return False
+        steered = self._steer_running_agent_for(agent, text, None, session_key)
+        logger.info("Plugin session steer: plugin=%s session=%s steered=%s", plugin_id, session_key, steered)
+        return steered

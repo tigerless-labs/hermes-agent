@@ -653,6 +653,16 @@ class PluginContext:
         from hermes_cli.plugins_interrupt import interrupt_plugin_session
         return interrupt_plugin_session(self, origin)
 
+    def steer_session(self, content: str, *, origin: Mapping[str, Any]) -> bool:
+        """Give the running turn of the messaging-gateway session at ``origin`` (the shape
+        ``inject_message`` takes) in THIS plugin's own profile *content* as a mid-turn message, the way
+        that turn's own sender steers it, and only when the turn acts for ``origin``'s sender (same
+        platform, scope and user id). Needs ``plugins.entries.<plugin_id>.allow_gateway_steer: true``.
+        ``True`` means the running turn took it; ``False`` changes nothing (nothing running there, the
+        turn acts for someone else, or it is still starting), so the plugin may start a turn instead."""
+        from hermes_cli.plugins_steer import steer_plugin_session
+        return steer_plugin_session(self, content, origin)
+
     @_serialized_replacement
     def register_cli_command(
         self, name: str, help: str, setup_fn: Callable, handler_fn: Callable | None = None,

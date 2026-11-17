@@ -1002,6 +1002,33 @@ plugins:
       allow_gateway_interrupt: true
 ```
 
+## Steering a gateway turn
+
+`ctx.steer_session(content, origin=...)` gives the running turn of the gateway session at a chat/thread `content` as a mid-turn message, the way that turn's own sender steers it, and only when the turn acts for `origin`'s sender (same platform, scope and user id). Use it, for example, to pass on what a person adds elsewhere about work the plugin started for them with `ctx.inject_message(origin=...)`.
+
+```python
+steered = ctx.steer_session("Only the PDFs, please", origin={
+    "platform": "slack", "chat_id": "D0123456789", "chat_type": "dm",
+    "thread_id": "1730000000.000100", "user_id": "U0123456789", "scope_id": "T0123456789",
+})
+if not steered:
+    ctx.inject_message("Only the PDFs, please", origin=...)  # nothing running for them there: a new turn
+```
+
+**Signature:** `ctx.steer_session(content: str, *, origin: Mapping[str, Any]) -> bool`
+
+- `origin` takes the same shape and the same checks as `inject_message(origin=...)`, and only reaches **the plugin's own profile**.
+- Returns `True` when the running turn took the message. Returns `False`, and changes nothing, when nothing runs there or the turn is still starting, the turn acts for someone else, the content is empty, the origin is refused, the permission is not granted, or no live gateway is running. It waits for the gateway loop's answer, so call it from a tool or hook thread, not from the gateway loop.
+
+Disabled by default for every plugin. Grant it per plugin in the plugin's own profile `config.yaml`:
+
+```yaml
+plugins:
+  entries:
+    my-plugin:
+      allow_gateway_steer: true
+```
+
 ## Calling MCP servers from plugins
 
 `ctx.call_mcp()` lets a plugin call a tool on one of the user's configured MCP servers — synchronously, from any hook or tool handler — routing through Hermes' existing native MCP client (same connections, trust-tier gates, circuit breaker, and reconnect logic as model-invoked MCP tools; never a parallel client).
