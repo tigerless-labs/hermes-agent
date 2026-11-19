@@ -2493,7 +2493,6 @@ class SlackAdapter(BasePlatformAdapter):
         tag = (metadata or {}).get(MESSAGE_TAG)
         blocks = _tagged(self._maybe_blocks(content), tag) if text else None
         line_owner = self._send_line_owner(chat_id, thread_ts, metadata)
-        blocks = self._with_line_record(blocks, line_owner)
         rides = _one_message_text(blocks, text, _one_message_max_bytes(self.config.extra))
         sent = None
         if rides is not None:
@@ -2573,12 +2572,14 @@ class SlackAdapter(BasePlatformAdapter):
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         broadcast = self.config.extra.get("reply_broadcast", False)
         blocks = _tagged(self._maybe_blocks(content), tag) if len(chunks) == 1 else None
-        blocks = self._with_line_record(blocks, line_owner)
+        line_metadata = self._line_metadata(line_owner)
         last_result = None
         for i, chunk in enumerate(chunks):
             kwargs = {
                 "channel": chat_id, "text": chunk,
                 "mrkdwn": True, **_slack_unfurl_kwargs(self.config.extra)}
+            if line_metadata:
+                kwargs["metadata"] = line_metadata
             if blocks and i == 0:
                 kwargs["blocks"] = blocks
             if thread_ts:
@@ -2694,10 +2695,12 @@ class SlackAdapter(BasePlatformAdapter):
             # would be wasteful and jittery. ``text`` is the fallback either way. A tagged edit
             # (``MESSAGE_TAG``) always carries its blocks: the tag rides on the first one.
             tag = (metadata or {}).get(MESSAGE_TAG)
+            line_metadata = self._line_metadata(
+                self._send_line_owner(chat_id, self._resolve_thread_ts(None, metadata), metadata))
+            if line_metadata:
+                update_kwargs["metadata"] = line_metadata
             if finalize or tag:
                 blocks = _tagged(self._maybe_blocks(content), tag)
-                blocks = self._with_line_record(
-                    blocks, self._send_line_owner(chat_id, self._resolve_thread_ts(None, metadata), metadata))
                 if blocks:
                     update_kwargs["blocks"] = blocks
             await self._call_with_block_fallback(
@@ -6391,10 +6394,11 @@ class SlackAdapter(BasePlatformAdapter):
         self, channel_id: str, thread_ts: str, limit: int, team_id: str) -> Any:
         """``conversations.replies`` with 1s/2s backoff on Tier-3 rate limits (429)."""
         client = self._get_client(channel_id, team_id=team_id)
+        with_lines = {"include_all_metadata": True} if self._slack_thread_lines() else {}
         for attempt in range(3):
             try:
                 return await client.conversations_replies(
-                    channel=channel_id, ts=thread_ts, limit=limit, inclusive=True)
+                    channel=channel_id, ts=thread_ts, limit=limit, inclusive=True, **with_lines)
             except Exception as exc:
                 err_str = str(exc).lower()
                 is_rate_limit = (
@@ -7002,17 +7006,17 @@ class SlackAdapter(BasePlatformAdapter):
         return self._thread_line_owner(
             chat_id, thread_ts, (metadata or {}).get("user_id"), self._metadata_team_id(metadata))
 
-    def _with_line_record(self, blocks: Optional[list], line_owner: str) -> Optional[list]:
-        """``blocks`` followed by the registered record's blocks for ``line_owner``'s line."""
+    def _line_metadata(self, line_owner: str) -> Optional[dict]:
+        """Slack message metadata naming ``line_owner``'s line (the registered record's), or None.
+        Metadata shows to no one in Slack; only the API reads it back."""
         record = self._slack_line_record()
-        if not blocks or not line_owner or record is None:
-            return blocks
+        if not line_owner or record is None:
+            return None
         try:
-            marked = [*blocks, *record.blocks(line_owner)]
+            return record.metadata(line_owner) or None
         except Exception:
             logger.warning("[Slack] Thread line record failed; the post goes without it", exc_info=True)
-            return blocks
-        return marked if len(marked) <= _SLACK_MAX_BLOCKS else blocks
+            return None
 
     def _line_of(self, msg: dict) -> Optional[str]:
         """The line owner the bot's own ``msg`` names by its record, or None."""
@@ -7429,7 +7433,6 @@ async def _message_ts_of_upload(client, file_obj: Dict[str, Any], chat_id: str) 
     return None
 
 
-_SLACK_MAX_BLOCKS = 50
 
 
 def _line_seen_through(messages: list, line_owner: str, current_ts: str, after_ts: str) -> str:
