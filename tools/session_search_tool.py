@@ -319,9 +319,15 @@ def _title_match_result(db, query: str, current_lineage_root: Optional[str],
         "_lineage_root": lineage_root}
 
 
+_OTHERS_ONLY_MESSAGE = ("Matching sessions exist, but they belong to other people (others_sessions); "
+                        "they are theirs to read and you have no access to them.")
 _NO_MATCH_MESSAGE = ("No matching sessions found. FTS5 ANDs all terms by default — "
                      "broaden with OR (`alpha OR beta`), exact-match with quoted "
                      "phrases, exclude with NOT, or prefix-match with `deploy*`.")
+
+
+def _belongs_to(owner: str) -> str:
+    return f"This session belongs to {owner}; it is theirs to read and you have no access to it."
 
 
 def _discover_payload(db, query: str, detail: str, results: list, **extra) -> str:
@@ -407,6 +413,7 @@ def _discover(db, query: str, role_filter: Optional[list[str]], limit: int, sort
     if not raw_results and not title_result:
         return _discover_payload(db, query, detail, [], message=_NO_MATCH_MESSAGE)
     seen_sessions: dict[str, dict[str, Any]] = {}
+    others: dict[str, set[str]] = {}
     results = [title_result] if title_result else []
     if title_result and (title_lineage := title_result.pop("_lineage_root", None)):
         seen_sessions[title_lineage] = {"_title_only": True}
@@ -438,6 +445,9 @@ def _discover(db, query: str, role_filter: Optional[list[str]], limit: int, sort
         if current_session_id and raw_sid == current_session_id and not is_compacted_hit:
             continue
         if gate is not None and resolved_sid not in seen_sessions and not gate.sees_all(db, raw_sid, resolved_sid):
+            owner = gate.owner_of_hidden(db, raw_sid, resolved_sid)
+            if owner:
+                others.setdefault(owner, set()).add(resolved_sid)
             continue
         seen_sessions.setdefault(resolved_sid, {**r, "_lineage_root": resolved_sid})
     for lineage_root, match_info in seen_sessions.items():
@@ -448,11 +458,14 @@ def _discover(db, query: str, role_filter: Optional[list[str]], limit: int, sort
                              gate)
         if entry is not None:
             results.append(entry)
+    private = {"others_sessions": [{"belongs_to": owner, "matching_sessions": len(ids), "readable": False}
+                                   for owner, ids in others.items()]} if others else {}
     if gate is not None and not results:
-        return _discover_payload(db, query, detail, [], message=_NO_MATCH_MESSAGE)
+        return _discover_payload(db, query, detail, [], message=_OTHERS_ONLY_MESSAGE if others else _NO_MATCH_MESSAGE,
+                                 **private)
     for entry in results:
         entry["link"] = _session_link(entry["session_id"], link_profile)
-    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), link_hint=(
+    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), **private, link_hint=(
         "When referring the user to a session, write its `link` value "
         "verbatim inline mid-sentence (it renders as a titled link) — never "
         "as markdown, in backticks, on its own line, or next to the "
@@ -477,6 +490,8 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_prof
                   gate: Optional[VisibilityGate] = None) -> str:
     """Read shape: whole session, or ``head`` + ``tail`` messages with a scroll pointer."""
     meta = _get_session_meta(db, session_id)
+    if meta and gate is not None and gate.owner_of_hidden(db, session_id):
+        return tool_error(_belongs_to(gate.owner_of_hidden(db, session_id)), success=False, readable=False)
     if not meta or (gate is not None and not gate.sees(db, session_id)):
         return tool_error(f"session_id not found: {session_id}", success=False)
     rows, err = _loud(lambda: db.get_messages(session_id), "get_messages failed for %s: %s", "failed to load session",
@@ -501,7 +516,8 @@ def _read_scoped(db, sid: str, profile: Optional[str], gate: Optional[Visibility
     ask properly: ``@session:<profile>/<id>`` or ``profile=``.
     """
     result = _read_session(db, sid, link_profile=profile, gate=gate)
-    if json.loads(result).get("success") is not False or profile:
+    answer = json.loads(result)
+    if answer.get("success") is not False or answer.get("readable") is False or profile:
         return result
     return tool_error(f"session_id not found in this profile: {sid}. If it belongs to another "
                       "profile, pass profile=<name> (or the @session:<profile>/<id> link).", success=False)
@@ -630,6 +646,8 @@ def _scroll(db, session_id: str, around_message_id: int, window: int = 5,
     if current_session_id and _anchor_in_live_context(db, anchor_state, owning or session_id, current_session_id):
         return tool_error("scroll rejected: anchor lives in the current session lineage (already in your active context)", success=False)
     session_meta = _get_session_meta(db, session_id)
+    if session_meta and gate is not None and gate.owner_of_hidden(db, session_id):
+        return tool_error(_belongs_to(gate.owner_of_hidden(db, session_id)), success=False, readable=False)
     if not session_meta or (gate is not None and not gate.sees(db, session_id)):
         return tool_error(f"session_id not found: {session_id}", success=False)
     view, err = _loud(lambda: db.get_messages_around(session_id, around_message_id, window=window),

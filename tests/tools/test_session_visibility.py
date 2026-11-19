@@ -340,3 +340,41 @@ def test_a_plugin_registers_the_one_session_visibility(tmp_path, monkeypatch):
     monkeypatch.setattr(plugins_mod, "_plugin_manager", None)
     provider = plugins_mod.get_plugin_session_visibility()
     assert isinstance(provider, SessionVisibility) and provider.name in {"first", "second"}
+
+
+class OwningRule(Rule):
+    def __init__(self, owners, **kwargs):
+        super().__init__(**kwargs)
+        self.owners = owners
+
+    def private_to(self, place):
+        owner = self.owners.get(place.id)
+        if owner == "explode":
+            raise RuntimeError("member lookup failed")
+        return owner
+
+
+def test_a_hidden_session_the_judgement_names_an_owner_for_is_reported_as_theirs_without_its_content(db, visibility):
+    _seed_budget(db)
+    visibility(Provider(OwningRule({"s_private": "<@U2>"}, visible=set())))
+    payload = session_search(query="confidential", db=db)
+    found = json.loads(payload)
+    assert found["results"] == []
+    assert found["others_sessions"] == [{"belongs_to": "<@U2>", "matching_sessions": 1, "readable": False}]
+    assert "10k" not in payload and "s_private" not in payload and "other people" in found["message"]
+
+
+def test_reading_a_session_that_belongs_to_someone_else_says_whose_it_is_and_shows_nothing(db, visibility):
+    _seed_budget(db)
+    visibility(Provider(OwningRule({"s_private": "<@U2>"}, visible={"s_open"})))
+    read = session_search(session_id="s_private", db=db)
+    assert "<@U2>" in read and "10k" not in read and "Confidential" not in read
+
+
+def test_redteam_an_owner_lookup_that_raises_hides_the_session_like_a_missing_one(db, visibility):
+    _seed_budget(db)
+    visibility(Provider(OwningRule({"s_private": "explode"}, visible=set())))
+    hidden = json.loads(session_search(query="confidential", db=db))
+    visibility()
+    missing = json.loads(session_search(query="nonexistentword", db=db))
+    assert hidden["results"] == missing["results"] == [] and "others_sessions" not in hidden
