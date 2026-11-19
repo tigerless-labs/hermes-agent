@@ -748,6 +748,25 @@ class PluginContext:
         logger.info("Plugin '%s' registered session visibility: %s", self.manifest.name, provider.name)
         return handle
 
+    def register_thread_line_record(self, record) -> Optional[PluginRegistration]:
+        """Register the (single) :class:`gateway.thread_lines.ThreadLineRecord` that names the line a
+        bot post belongs to; a second registration is rejected with a warning."""
+        if self._manager._thread_line_record is not None:
+            logger.warning("Plugin '%s' tried to register a thread line record, but one is already "
+                           "registered. Only one is allowed.", self.manifest.name)
+            return None
+        from gateway.thread_lines import ThreadLineRecord
+        if self._wrong_type(record, ThreadLineRecord, "thread line record"):
+            return None
+        self._manager._thread_line_record = record
+        handle = self._track_replacement(
+            "thread_line_record", type(record).__qualname__,
+            slot=("manager_value", id(self._manager), "_thread_line_record"), current=record, previous=None,
+            restore=lambda replacement: self._manager._restore_value("_thread_line_record", record, replacement),
+        )
+        logger.info("Plugin '%s' registered a thread line record", self.manifest.name)
+        return handle
+
     def register_context_reference(self, provider) -> None:
         """Register a :class:`agent.context_references.ContextReferenceProvider`; ``provider.prefix``
         defines ``@<prefix>:``. Built-in prefixes (diff, staged, file, folder, git, url) are
@@ -1217,6 +1236,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._tui_message_injector: tuple[object, Callable] | None = None
         self._context_engine = None  # Set by a plugin via register_context_engine()
         self._session_visibility = None  # Set by a plugin via register_session_visibility()
+        self._thread_line_record = None  # Set by a plugin via register_thread_line_record()
         # Manager-local registries keyed by name (see the matching ``PluginContext.register_*``):
         # plugins, hooks, middleware, CLI + slash commands, prompt sections, skills (qualified name ->
         # metadata), portable MCP servers, auxiliary tasks, approval transports, Slack action handlers
@@ -2228,6 +2248,11 @@ def get_plugin_context_engine():
 def get_plugin_session_visibility():
     """Return the plugin-registered session visibility provider, or None."""
     return _ensure_plugins_discovered()._session_visibility
+
+
+def get_plugin_thread_line_record():
+    """Return the plugin-registered thread line record, or None (read without discovery)."""
+    return get_plugin_manager()._thread_line_record
 
 
 def get_plugin_command_handler(name: str) -> Optional[Callable]:

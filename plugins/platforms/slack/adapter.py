@@ -2215,6 +2215,9 @@ class SlackAdapter(BasePlatformAdapter):
         thread_ts = self._resolve_thread_ts(reply_to, metadata)
         if not thread_ts:
             return None
+        line_owner = self._send_line_owner(chat_id, str(thread_ts), metadata)
+        if line_owner:
+            return (*self._workspace_thread_key(self._metadata_team_id(metadata), chat_id, str(thread_ts)), line_owner)
         return self._workspace_thread_key(
             self._metadata_team_id(metadata), chat_id, str(thread_ts))
 
@@ -2424,7 +2427,8 @@ class SlackAdapter(BasePlatformAdapter):
                 return SendResult(success=True)
             thread_ts = self._resolve_thread_ts(reply_to, metadata)
             last_result = await self._post_chunks(chat_id, team_id, content, formatted, thread_ts,
-                                                  tag=(metadata or {}).get(MESSAGE_TAG))
+                                                  tag=(metadata or {}).get(MESSAGE_TAG),
+                                                  line_owner=self._send_line_owner(chat_id, thread_ts, metadata))
             # Clear Slack Assistant status as soon as the final message is posted.
             if thread_ts:
                 await self.stop_typing(chat_id, metadata=metadata)
@@ -2488,18 +2492,21 @@ class SlackAdapter(BasePlatformAdapter):
         text = formatted if formatted and formatted.strip() else ""
         tag = (metadata or {}).get(MESSAGE_TAG)
         blocks = _tagged(self._maybe_blocks(content), tag) if text else None
+        line_owner = self._send_line_owner(chat_id, thread_ts, metadata)
+        blocks = self._with_line_record(blocks, line_owner)
         rides = _one_message_text(blocks, text, _one_message_max_bytes(self.config.extra))
         sent = None
         if rides is not None:
             sent = await _upload_as_one_message(self._client_for(chat_id, metadata), chat_id, files, thread_ts, **rides)
         if sent is not None:
             await self._notify_unsent(chat_id, sent["unsent"], thread_ts, metadata)
-            self._remember_sent_files(chat_id, thread_ts, sent.get("files") or [])
+            self._remember_sent_files(chat_id, thread_ts, sent.get("files") or [], line_owner=line_owner)
             message_id = sent["message_id"]
         else:
             message_id = None
             if text:
-                last_result = await self._post_chunks(chat_id, team_id, content, formatted, thread_ts, tag=tag)
+                last_result = await self._post_chunks(chat_id, team_id, content, formatted, thread_ts, tag=tag,
+                                                      line_owner=line_owner)
                 message_id = last_result.get("ts") if last_result else None
             files_sent = await self._send_files_only(chat_id, files, thread_ts or message_id, metadata)
             message_id = message_id or (files_sent or {}).get("message_id")
@@ -2515,26 +2522,32 @@ class SlackAdapter(BasePlatformAdapter):
             return None
         sent = await _upload_as_one_message(self._client_for(chat_id, metadata), chat_id, files, thread_ts)
         await self._notify_unsent(chat_id, sent["unsent"] if sent is not None else files, thread_ts, metadata)
-        self._remember_sent_files(chat_id, thread_ts, (sent or {}).get("files") or [])
+        self._remember_sent_files(chat_id, thread_ts, (sent or {}).get("files") or [],
+                                  line_owner=self._send_line_owner(chat_id, thread_ts, metadata))
         return sent
 
     # Threads whose next turn still owes the files a reply sent; the oldest go first past this many.
     _SENT_FILES_MAX_THREADS = 500
 
-    def _remember_sent_files(self, chat_id: str, thread_ts: Optional[str], files: List[Dict[str, str]]) -> None:
-        """``extra.sent_files_in_next_turn``: keep the files a reply sent until the next turn of its thread."""
+    def _remember_sent_files(self, chat_id: str, thread_ts: Optional[str], files: List[Dict[str, str]], *,
+                             line_owner: str = "") -> None:
+        """``extra.sent_files_in_next_turn``: keep the files a reply sent until the next turn of its thread
+        (of its line, with ``extra.thread_lines``)."""
         if not (files and self._extra_flag("sent_files_in_next_turn")):
             return
         owed = self.__dict__.setdefault("_sent_files_by_thread", {})
         key = (chat_id, thread_ts or "")
+        key = (*key, line_owner) if line_owner else key
         owed[key] = [*owed.pop(key, []), *files]
         while len(owed) > self._SENT_FILES_MAX_THREADS:
             owed.pop(next(iter(owed)))
 
-    def _with_sent_files(self, channel_context: Optional[str], chat_id: str, thread_ts: Optional[str]) -> Optional[str]:
+    def _with_sent_files(self, channel_context: Optional[str], chat_id: str, thread_ts: Optional[str], *,
+                         line_owner: str = "") -> Optional[str]:
         """The files the thread's last reply sent, once, as file markers with their Slack ids ahead of the
         thread context; the session already holds the reply's text but not those ids."""
-        files = self.__dict__.get("_sent_files_by_thread", {}).pop((chat_id, thread_ts or ""), [])
+        key = (chat_id, thread_ts or "")
+        files = self.__dict__.get("_sent_files_by_thread", {}).pop((*key, line_owner) if line_owner else key, [])
         if not files:
             return channel_context
         markers = " ".join(_slack_file_marker(
@@ -2551,7 +2564,7 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def _post_chunks(
         self, chat_id: str, team_id: str, content: str, formatted: str, thread_ts: Optional[str], *,
-        tag: Optional[str] = None,
+        tag: Optional[str] = None, line_owner: str = "",
     ) -> Any:
         """``chat.postMessage`` each ``MAX_MESSAGE_LENGTH`` chunk; returns the last response.
         Block Kit only for single-chunk messages (a >39k response is pathological for the 50-block /
@@ -2560,6 +2573,7 @@ class SlackAdapter(BasePlatformAdapter):
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         broadcast = self.config.extra.get("reply_broadcast", False)
         blocks = _tagged(self._maybe_blocks(content), tag) if len(chunks) == 1 else None
+        blocks = self._with_line_record(blocks, line_owner)
         last_result = None
         for i, chunk in enumerate(chunks):
             kwargs = {
@@ -2682,6 +2696,8 @@ class SlackAdapter(BasePlatformAdapter):
             tag = (metadata or {}).get(MESSAGE_TAG)
             if finalize or tag:
                 blocks = _tagged(self._maybe_blocks(content), tag)
+                blocks = self._with_line_record(
+                    blocks, self._send_line_owner(chat_id, self._resolve_thread_ts(None, metadata), metadata))
                 if blocks:
                     update_kwargs["blocks"] = blocks
             await self._call_with_block_fallback(
@@ -4716,11 +4732,16 @@ class SlackAdapter(BasePlatformAdapter):
         has_active_thread_session = self._has_active_session_for_thread(
             channel_id=channel_id, thread_ts=event_thread_ts, user_id=user_id, team_id=team_id,
             chat_type="dm" if is_dm else "group")
+        line_owner = self._thread_line_owner(channel_id, event_thread_ts, user_id, team_id, is_dm=is_dm)
 
         async def _fetch(**kw) -> None:
             nonlocal channel_context
             if has_active_thread_session and self._slack_thread_context_unseen_only():
                 kw.update(after_ts=kw.get("after_ts") or event_thread_ts, without_own=True)
+            if line_owner and has_active_thread_session:
+                kw.update(after_ts=kw.get("after_ts") or event_thread_ts, without_own=True)
+            if line_owner and self._slack_line_record() is not None:
+                kw["line_owner"] = line_owner
             thread_context = await self._fetch_thread_context(
                 channel_id=channel_id, thread_ts=event_thread_ts, current_ts=ts, team_id=team_id,
                 **kw)
@@ -4736,6 +4757,8 @@ class SlackAdapter(BasePlatformAdapter):
             ) = await self._collect_thread_root_images(
                 channel_id=channel_id, thread_ts=event_thread_ts, team_id=team_id)
         elif is_mentioned:
+            await _fetch(after_ts=self._get_thread_watermark(**watermark_args), force_refresh=True)
+        elif line_owner:
             await _fetch(after_ts=self._get_thread_watermark(**watermark_args), force_refresh=True)
         else:
             # Restart rehydration (#63530 restart gap / #33215): persistent sessions survive gateway
@@ -5028,7 +5051,9 @@ class SlackAdapter(BasePlatformAdapter):
             channel_id=channel_id, event_thread_ts=event_thread_ts, ts=ts, user_id=user_id,
             team_id=team_id, is_thread_reply=is_thread_reply, is_mentioned=is_mentioned,
             is_dm=is_dm)
-        channel_context = self._with_sent_files(channel_context, channel_id, event_thread_ts)
+        channel_context = self._with_sent_files(
+            channel_context, channel_id, event_thread_ts,
+            line_owner=self._thread_line_owner(channel_id, event_thread_ts, user_id, team_id, is_dm=is_dm))
         # Thread-root media is delivered ahead of the trigger message's own files.
         media_urls, media_types, media_text_inlined, text = await self._collect_inbound_media(
             event, channel_id, team_id, text, thread_root_media_urls, thread_root_media_types)
@@ -6288,7 +6313,7 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def _fetch_thread_context(
         self, channel_id: str, thread_ts: str, current_ts: str, team_id: str = "", limit: int = 30,
-        after_ts: str = "", force_refresh: bool = False, without_own: bool = False) -> str:
+        after_ts: str = "", force_refresh: bool = False, without_own: bool = False, line_owner: str = "") -> str:
         """Prior thread messages as formatted context ("" on failure/empty). Cold-start only
         (session history holds them afterwards); ``after_ts`` = session watermark returns only
         unseen messages; ``force_refresh`` bypasses the _THREAD_CACHE_TTL cache (Tier 3 API).
@@ -6303,7 +6328,10 @@ class SlackAdapter(BasePlatformAdapter):
             self._format_thread_context, thread_ts=thread_ts, current_ts=current_ts,
             team_id=team_id, channel_id=channel_id)
         unseen_only = self._slack_thread_context_unseen_only()
+        _line_fmt = functools.partial(_fmt, line_owner=line_owner)
         if cached and (now - cached.fetched_at) < self._THREAD_CACHE_TTL:
+            if line_owner and cached.messages:
+                return (await _line_fmt(cached.messages, after_ts=after_ts, without_own=without_own))[0]
             if unseen_only and cached.messages:
                 return (await _fmt(cached.messages, after_ts=after_ts, without_own=without_own))[0]
             if not after_ts:
@@ -6339,6 +6367,8 @@ class SlackAdapter(BasePlatformAdapter):
                     if now - v.fetched_at >= self._THREAD_CACHE_TTL]
                 for k in stale_keys:
                     del self._thread_context_cache[k]
+            if line_owner:
+                return (await _line_fmt(messages, after_ts=after_ts, without_own=without_own))[0]
             if unseen_only and without_own:
                 return (await _fmt(messages, after_ts=after_ts, without_own=True))[0]
             if after_ts:
@@ -6381,7 +6411,7 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def _format_thread_context(
         self, messages: list[dict[str, Any]], *, thread_ts: str, current_ts: str, team_id: str,
-        channel_id: str, after_ts: str = "", without_own: bool = False) -> tuple[str, str]:
+        channel_id: str, after_ts: str = "", without_own: bool = False, line_owner: str = "") -> tuple[str, str]:
         """Format Slack replies into an injected thread-context block.
         With ``after_ts``, only messages strictly newer than the watermark are included (delta
         refresh); parent text is still captured. Returns ``(content, parent_text)``.
@@ -6401,7 +6431,10 @@ class SlackAdapter(BasePlatformAdapter):
             skip_for_delta = bool(after_ts and msg_ts and msg_ts <= after_ts)
             if skip_for_delta and not is_parent:
                 continue
-            if without_own and not is_parent and self._is_own_bot_message(msg, team_id):
+            if without_own and not line_owner and not is_parent and self._is_own_bot_message(msg, team_id):
+                continue
+            if without_own and line_owner and not is_parent and self._is_own_bot_message(msg, team_id) \
+                    and self._line_of(msg) == line_owner:
                 continue
             msg_text = self._render_message_text(msg, bot_uid=bot_uid, file_ids=self._files_by_id())
             if not msg_text:
@@ -6415,7 +6448,7 @@ class SlackAdapter(BasePlatformAdapter):
                 if skip_for_delta:
                     continue
             context_parts.append(
-                await self._thread_context_line(msg, msg_text, is_parent, team_id, channel_id))
+                await self._thread_context_line(msg, msg_text, is_parent, team_id, channel_id, line_owner=line_owner))
         content = ""
         if context_parts:
             has_unverified = any("[unverified] " in part for part in context_parts)
@@ -6440,7 +6473,8 @@ class SlackAdapter(BasePlatformAdapter):
         return bool(self_bot_uid and self._event_declares_bot_sender(msg) and msg.get("user") == self_bot_uid)
 
     async def _thread_context_line(
-        self, msg: dict, msg_text: str, is_parent: bool, team_id: str, channel_id: str) -> str:
+        self, msg: dict, msg_text: str, is_parent: bool, team_id: str, channel_id: str, *,
+        line_owner: str = "") -> str:
         """One ``[prefix][trust] name: text`` context line. Own prior replies are kept as
         ``[assistant]`` (no name lookup) so the agent can reconstruct its turns on cold start.
         Non-allowlisted humans are tagged ``[unverified]`` so the LLM treats them as background,
@@ -6456,6 +6490,8 @@ class SlackAdapter(BasePlatformAdapter):
         ) or self._bot_user_id
         is_self_bot_reply = is_bot and not is_parent and self_bot_uid and msg_user == self_bot_uid
         prefix = "[thread parent] " if is_parent else "[assistant] " if is_self_bot_reply else ""
+        if is_self_bot_reply and line_owner:
+            return await self._other_line_context(msg, msg_text, line_owner, team_id, channel_id)
         if is_self_bot_reply:
             return f"{prefix}{msg_text}"
         display_user = msg_user or "unknown"
@@ -6932,6 +6968,68 @@ class SlackAdapter(BasePlatformAdapter):
     _slack_expected_reply_cues = _extra_or_env_flag_getter(
         "expected_reply_cues", "SLACK_EXPECTED_REPLY_CUES")
     _slack_disable_dms = _extra_or_env_flag_getter("disable_dms", "SLACK_DISABLE_DMS", strip=True)
+    # thread_lines: in a chat whose threads are per user, each person's session is a line that reads the
+    # thread every turn, and the bot's posts carry and are read by their line (gateway.thread_lines).
+    _slack_thread_lines = _extra_or_env_flag_getter("thread_lines", "SLACK_THREAD_LINES")
+
+    @staticmethod
+    def _slack_line_record() -> Any:
+        from hermes_cli.plugins import get_plugin_thread_line_record
+        return get_plugin_thread_line_record()
+
+    def _thread_line_owner(
+        self, chat_id: str, thread_ts: Optional[str], user_id: Optional[str], team_id: str = "", *,
+        is_dm: bool = False) -> str:
+        """``user_id`` when ``extra.thread_lines`` is on and this thread of ``chat_id`` keeps a session per
+        person (``thread_sessions_per_user``), else ""."""
+        if not (self._slack_thread_lines() and thread_ts and user_id and chat_id) or is_dm \
+                or str(chat_id).startswith("D"):
+            return ""
+        return str(user_id) if self.config.extra.get("thread_sessions_per_user", False) else ""
+
+    def _send_line_owner(
+        self, chat_id: str, thread_ts: Optional[str], metadata: Optional[dict[str, Any]]) -> str:
+        """The line a send with this turn's ``metadata`` posts in, or ""."""
+        return self._thread_line_owner(
+            chat_id, thread_ts, (metadata or {}).get("user_id"), self._metadata_team_id(metadata))
+
+    def _with_line_record(self, blocks: Optional[list], line_owner: str) -> Optional[list]:
+        """``blocks`` followed by the registered record's blocks for ``line_owner``'s line."""
+        record = self._slack_line_record()
+        if not blocks or not line_owner or record is None:
+            return blocks
+        try:
+            marked = [*blocks, *record.blocks(line_owner)]
+        except Exception:
+            logger.warning("[Slack] Thread line record failed; the post goes without it", exc_info=True)
+            return blocks
+        return marked if len(marked) <= _SLACK_MAX_BLOCKS else blocks
+
+    def _line_of(self, msg: dict) -> Optional[str]:
+        """The line owner the bot's own ``msg`` names by its record, or None."""
+        record = self._slack_line_record()
+        try:
+            owner = record.owner(msg) if record is not None else None
+        except Exception:
+            logger.debug("[Slack] Thread line record unreadable", exc_info=True)
+            return None
+        return owner if isinstance(owner, str) and owner else None
+
+    async def _other_line_context(
+        self, msg: dict, msg_text: str, line_owner: str, team_id: str, channel_id: str) -> str:
+        """The bot's own post as a line's context: ``[assistant]`` in its own line, else labelled by the record."""
+        from gateway.session import neutralize_untrusted_inline_text
+        owner = self._line_of(msg)
+        if owner == line_owner:
+            return f"[assistant] {msg_text}"
+        name = await self._resolve_user_name(owner, chat_id=channel_id, team_id=team_id) if owner else None
+        try:
+            label = self._slack_line_record().label(neutralize_untrusted_inline_text(name) if name else None)
+        except Exception:
+            logger.debug("[Slack] Thread line label failed", exc_info=True)
+            return f"[assistant] {msg_text}"
+        safe_label = neutralize_untrusted_inline_text(str(label))
+        return f"{safe_label}: {neutralize_untrusted_inline_text(msg_text, max_chars=0)}"
 
     def _slack_message_addressed_to_other_user(self, text: str, self_uids: set) -> bool:
         """True when the first token is a user mention (``<@U123>``/``<@U123|name>``)
@@ -7320,6 +7418,9 @@ async def _message_ts_of_upload(client, file_obj: Dict[str, Any], chat_id: str) 
     logger.warning("[Slack] Slack had not shared the upload after %d checks; its message ts is unknown",
                    _SHARE_POLL_ATTEMPTS)
     return None
+
+
+_SLACK_MAX_BLOCKS = 50
 
 
 def _tagged(blocks: Optional[list], tag: Optional[str]) -> Optional[list]:
