@@ -626,7 +626,7 @@ _PER_TURN_RESET_STATE: tuple[tuple[str, Any], ...] = (
     ("_iteration_budget_warning_injected", False),
     ("_run_budget_wrapup_injected", False), ("_verification_stop_nudges", 0),
     ("_pre_verify_nudges", 0), ("_reply_required_nudges", 0),
-    ("_steer_closed", False),
+    ("_steer_closed", False), ("_turn_held", False),
 )
 
 
@@ -637,6 +637,8 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
     agent._turn_failed_file_mutations = {}
     agent._turn_file_mutation_paths = set()
     agent._tool_guardrails.reset_for_turn()
+    from agent import turn_hold
+    turn_hold.forget(getattr(agent, "session_id", None))
     _reset_consol = getattr(agent._memory_store, "reset_consolidation_failures", None)
     if callable(_reset_consol):
         _reset_consol()

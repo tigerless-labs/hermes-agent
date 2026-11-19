@@ -1002,6 +1002,35 @@ plugins:
       allow_gateway_interrupt: true
 ```
 
+## Holding a turn for a person
+
+`ctx.hold_turn(session_id)` ends the running turn after its current tool round when a tool leaves its call waiting on a person, for example an approval card or a sign-in link the plugin has just sent. The round's other calls still run; then the turn ends with no further model call and no reply, and the turn's result carries `held: true`. It is the shape of a run that returns approval interruptions: the pending call and its answer stay in the transcript, and nothing is said in place of the card.
+
+```python
+def send_mail(args, session_id=None, **_):
+    show_approval_card(args)
+    ctx.hold_turn(session_id)
+    return json.dumps({"status": "waiting_for_approval"})
+```
+
+**Signature:** `ctx.hold_turn(session_id: str) -> bool`
+
+- `session_id` is the id the tool handler was called with.
+- The plugin owns what the person sees and what happens next: once the person has answered, start the turn that carries on with `ctx.inject_message(...)`.
+- On a messaging gateway a held turn sends nothing, even when the message was addressed to the bot.
+- A subagent's turn is not held: its result still has to reach its parent.
+- A request made while no turn runs is dropped when that session's next turn starts.
+- Returns `True` when the hold was asked for; `False`, and changes nothing, when the permission is not granted or `session_id` is not a non-empty string.
+
+Disabled by default for every plugin. Grant it per plugin in the plugin's own profile `config.yaml`:
+
+```yaml
+plugins:
+  entries:
+    my-plugin:
+      allow_turn_hold: true
+```
+
 ## Calling MCP servers from plugins
 
 `ctx.call_mcp()` lets a plugin call a tool on one of the user's configured MCP servers — synchronously, from any hook or tool handler — routing through Hermes' existing native MCP client (same connections, trust-tier gates, circuit breaker, and reconnect logic as model-invoked MCP tools; never a parallel client).
