@@ -6419,6 +6419,8 @@ class SlackAdapter(BasePlatformAdapter):
         See #23918.
         """
         bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
+        if line_owner and without_own and after_ts:
+            after_ts = _line_seen_through(messages, line_owner, current_ts, after_ts)
         context_parts = []
         parent_text = ""
         for msg in messages:
@@ -7428,6 +7430,20 @@ async def _message_ts_of_upload(client, file_obj: Dict[str, Any], chat_id: str) 
 
 
 _SLACK_MAX_BLOCKS = 50
+
+
+def _line_seen_through(messages: list, line_owner: str, current_ts: str, after_ts: str) -> str:
+    """How far a line has read: its watermark, or its owner's last message before this one when later.
+    Every message of the owner was a turn of the line, which read the thread up to it; a line's first turn
+    runs before its session exists, so that turn's watermark is never stored."""
+    def _ts(value: str) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    owned = [m.get("ts", "") for m in messages
+             if m.get("user") == line_owner and _ts(m.get("ts", "")) < _ts(current_ts)]
+    return max([after_ts, *owned], key=_ts)
 
 
 def _only_task_card(msg: dict) -> bool:

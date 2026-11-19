@@ -113,6 +113,17 @@ async def test_every_turn_of_a_line_reads_what_the_thread_gained(lines, on):
 
 
 @pytest.mark.asyncio
+async def test_a_lines_second_turn_reads_only_what_came_after_its_owners_last_message(lines):
+    early = _said("1700000000.000015", "budget is 40k", user=BEN)
+    first = _said("1700000000.000020", "hi")
+    await _open_line(lines, ANN, first["ts"], [ROOT, early, first])
+    current = _said("1700000000.000090", "and now?")
+    _arm(lines, [ROOT, early, first, _said("1700000000.000050", "I'm out friday", user=BEN), current])
+    backfill = _backfill(await _admit(lines, _message(current["text"], current["ts"])))
+    assert "budget is 40k" not in backfill and "I'm out friday" in backfill
+
+
+@pytest.mark.asyncio
 async def test_a_line_leaves_its_own_posts_out_and_reads_other_lines_by_their_record(lines):
     first = _said("1700000000.000020", "hi")
     await _open_line(lines, ANN, first["ts"], [ROOT, first])
