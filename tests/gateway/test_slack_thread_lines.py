@@ -121,8 +121,11 @@ async def test_a_line_leaves_its_own_posts_out_and_reads_other_lines_by_their_re
                  _posted("1700000000.000030", "Ann's rows: 42", owner=ANN),
                  _said("1700000000.000040", f"<@{BOT_USER_ID}> my calendar?", user=BEN),
                  _posted("1700000000.000050", "Ben is free at 3", owner=BEN),
-                 _posted("1700000000.000060", "Restarting shortly"), current])
+                 _posted("1700000000.000060", "Restarting shortly"),
+                 {"ts": "1700000000.000070", "user": BOT_USER_ID, "bot_id": "B_SELF", "text": "Worked for 17s",
+                  "blocks": [{"type": "plan", "block_id": "plan-id"}]}, current])
     backfill = _backfill(await _admit(lines, _message(current["text"], current["ts"])))
+    assert "Worked for 17s" not in backfill
     assert "Ann's rows: 42" not in backfill
     assert "Lara (@Ben's line): Ben is free at 3" in backfill
     assert "Lara: Restarting shortly" in backfill

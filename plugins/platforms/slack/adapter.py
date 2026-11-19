@@ -6434,7 +6434,7 @@ class SlackAdapter(BasePlatformAdapter):
             if without_own and not line_owner and not is_parent and self._is_own_bot_message(msg, team_id):
                 continue
             if without_own and line_owner and not is_parent and self._is_own_bot_message(msg, team_id) \
-                    and self._line_of(msg) == line_owner:
+                    and (self._line_of(msg) == line_owner or _only_task_card(msg)):
                 continue
             msg_text = self._render_message_text(msg, bot_uid=bot_uid, file_ids=self._files_by_id())
             if not msg_text:
@@ -7428,6 +7428,12 @@ async def _message_ts_of_upload(client, file_obj: Dict[str, Any], chat_id: str) 
 
 
 _SLACK_MAX_BLOCKS = 50
+
+
+def _only_task_card(msg: dict) -> bool:
+    """True for a bot post that is nothing but a native task card (``plan`` blocks): status, not content."""
+    blocks = msg.get("blocks") or []
+    return bool(blocks) and all(isinstance(b, dict) and b.get("type") == "plan" for b in blocks)
 
 
 def _tagged(blocks: Optional[list], tag: Optional[str]) -> Optional[list]:
