@@ -6972,6 +6972,13 @@ class SlackAdapter(BasePlatformAdapter):
     # thread every turn, and the bot's posts carry and are read by their line (gateway.thread_lines).
     _slack_thread_lines = _extra_or_env_flag_getter("thread_lines", "SLACK_THREAD_LINES")
 
+    def _turn_send_metadata(self, event: MessageEvent, metadata: Optional[dict]) -> Optional[dict]:
+        """With ``extra.thread_lines``, this turn's replies carry its speaker so they post in the speaker's line."""
+        user_id = getattr(event.source, "user_id", None)
+        if not (self._slack_thread_lines() and user_id):
+            return metadata
+        return {**(metadata or {}), "user_id": (metadata or {}).get("user_id") or str(user_id)}
+
     @staticmethod
     def _slack_line_record() -> Any:
         from hermes_cli.plugins import get_plugin_thread_line_record

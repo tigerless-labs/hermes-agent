@@ -7,6 +7,7 @@ label. Only the bot's own messages are read for a record, so a person who types 
 A chat that shares its threads, a direct message, or the switch off keep upstream behaviour. Driven
 through the real ``_handle_slack_message`` and ``send``."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -237,6 +238,14 @@ def test_files_a_line_sent_come_back_to_that_line_only(lines):
     lines._remember_sent_files(CHANNEL_ID, THREAD, [{"id": "F1", "name": "rows.csv"}], line_owner=ANN)
     assert lines._with_sent_files(None, CHANNEL_ID, THREAD, line_owner=BEN) is None
     assert "rows.csv" in lines._with_sent_files(None, CHANNEL_ID, THREAD, line_owner=ANN)
+
+
+def test_a_turns_own_replies_carry_its_speaker_so_they_post_in_the_speakers_line(lines):
+    event = SimpleNamespace(source=SimpleNamespace(user_id=BEN))
+    assert lines._turn_send_metadata(event, {"thread_id": THREAD}) == {"thread_id": THREAD, "user_id": BEN}
+    assert lines._turn_send_metadata(event, None) == {"user_id": BEN}
+    lines.config.extra["thread_lines"] = False
+    assert lines._turn_send_metadata(event, {"thread_id": THREAD}) == {"thread_id": THREAD}
 
 
 def test_thread_lines_defaults_off(adapter, monkeypatch):

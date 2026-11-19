@@ -3713,7 +3713,7 @@ class BasePlatformAdapter(ABC):
     async def _dispatch_inline_reply(self, event: MessageEvent, *, log_cmd: Optional[str] = None) -> None:
         """Call the handler and send its reply inline, with retry, threading and
         ephemeral deletion — no session lifecycle (active-session bypass paths)."""
-        thread_meta = _thread_metadata_for_event(event)
+        thread_meta = self._turn_send_metadata(event, _thread_metadata_for_event(event))
         response = await self._message_handler(event)
         text, eph_ttl = self._unwrap_ephemeral(response)
         if not text:
@@ -4555,7 +4555,7 @@ class BasePlatformAdapter(ABC):
         a failing notice is logged, never raised). Returns the thread metadata used."""
         _thread_metadata = None
         try:
-            _thread_metadata = _thread_metadata_for_event(event)
+            _thread_metadata = self._turn_send_metadata(event, _thread_metadata_for_event(event))
             error_detail = str(e)[:300] if str(e) else t("gateway.notify.turn_error_no_details")
             # Only the policy reads bind the routed profile; the send stays in the launch scope
             # as before, so delivery bookkeeping keeps landing where boot-time recovery reads it.
@@ -4616,6 +4616,10 @@ class BasePlatformAdapter(ABC):
                          "(%d chars) produced no delivered message or attachment "
                          "for %s (empty after extract, recovery yielded nothing).", self.name,
                          len(extracted.pre_extract), event.source.chat_id)
+
+    def _turn_send_metadata(self, event: MessageEvent, metadata: Optional[dict]) -> Optional[dict]:
+        """Send metadata for this turn's own replies; a platform may add per-turn keys (the base adds none)."""
+        return metadata
 
     def _start_typing_refresh(self, event: MessageEvent, interrupt_event: asyncio.Event,
                               metadata: Optional[dict]) -> Optional[asyncio.Task]:
@@ -4733,7 +4737,7 @@ class BasePlatformAdapter(ABC):
         # Reuse the interrupt event handle_message() installed; new Event only if removed externally.
         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
         self._active_sessions[session_key] = interrupt_event
-        _thread_metadata = _thread_metadata_for_event(event)
+        _thread_metadata = self._turn_send_metadata(event, _thread_metadata_for_event(event))
         typing_task = self._start_typing_refresh(event, interrupt_event, _thread_metadata)
         try:
             await self._run_processing_hook("on_processing_start", event)
