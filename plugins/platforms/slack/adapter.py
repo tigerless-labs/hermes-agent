@@ -6440,7 +6440,9 @@ class SlackAdapter(BasePlatformAdapter):
             if without_own and not line_owner and not is_parent and self._is_own_bot_message(msg, team_id):
                 continue
             if without_own and line_owner and not is_parent and self._is_own_bot_message(msg, team_id) \
-                    and (self._line_of(msg) == line_owner or _only_task_card(msg)):
+                    and self._line_of(msg) == line_owner:
+                continue
+            if line_owner and not is_parent and self._is_own_bot_message(msg, team_id) and _only_task_card(msg):
                 continue
             msg_text = self._render_message_text(msg, bot_uid=bot_uid, file_ids=self._files_by_id())
             if not msg_text:

@@ -150,10 +150,12 @@ async def test_a_line_leaves_its_own_posts_out_and_reads_other_lines_by_their_re
 @pytest.mark.asyncio
 async def test_a_new_line_reads_the_whole_thread_with_each_post_under_its_line(lines):
     current = _said("1700000000.000090", f"<@{BOT_USER_ID}> same for me", user=BEN)
-    _arm(lines, [ROOT, _posted("1700000000.000030", "Ann's rows: 42", owner=ANN), current])
+    card = {"ts": "1700000000.000020", "user": BOT_USER_ID, "bot_id": "B_SELF", "text": "Worked for 12s",
+            "blocks": [{"type": "plan", "block_id": "plan-id"}]}
+    _arm(lines, [ROOT, card, _posted("1700000000.000030", "Ann's rows: 42", owner=ANN), current])
     backfill = _backfill(await _admit(lines, _message(current["text"], current["ts"], user=BEN)))
     assert "pull the numbers" in backfill and "Lara (@Ann's line): Ann's rows: 42" in backfill
-    assert "[assistant]" not in backfill
+    assert "[assistant]" not in backfill and "Worked for 12s" not in backfill
 
 
 @pytest.mark.asyncio
