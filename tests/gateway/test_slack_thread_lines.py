@@ -294,3 +294,26 @@ def test_a_plugin_registers_the_one_thread_line_record(tmp_path, monkeypatch):
     monkeypatch.setattr(plugins_mod, "_plugin_manager", None)
     plugins_mod._ensure_plugins_discovered()
     assert isinstance(plugins_mod.get_plugin_thread_line_record(), ThreadLineRecord)
+
+
+@pytest.mark.asyncio
+async def test_a_group_dm_gives_each_person_a_line_like_a_channel(lines):
+    group_dm = "C0GROUPDM1"
+    _arm(lines, [ROOT])
+    ann = await _admit(lines, {**_message(f"<@{BOT_USER_ID}> hi", "1700000000.000020", user=ANN, channel=group_dm),
+                               "channel_type": "mpim"})
+    ben = await _admit(lines, {**_message(f"<@{BOT_USER_ID}> me too", "1700000000.000030", user=BEN, channel=group_dm),
+                               "channel_type": "mpim"})
+    assert ann.source.chat_type == ben.source.chat_type == "group"
+    from gateway.session import build_session_key
+    assert build_session_key(ann.source, thread_sessions_per_user=True) != \
+        build_session_key(ben.source, thread_sessions_per_user=True)
+
+
+@pytest.mark.asyncio
+async def test_with_lines_off_a_group_dm_stays_dm_style(lines):
+    lines.config.extra["thread_lines"] = False
+    _arm(lines, [ROOT])
+    event = await _admit(lines, {**_message(f"<@{BOT_USER_ID}> hi", "1700000000.000020", user=ANN, channel="C0GROUPDM1"),
+                                 "channel_type": "mpim"})
+    assert event.source.chat_type == "dm"

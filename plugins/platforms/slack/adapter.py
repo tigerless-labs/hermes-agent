@@ -5002,6 +5002,8 @@ class SlackAdapter(BasePlatformAdapter):
             self._remember_channel_team(channel_id, team_id)
         channel_type = event.get("channel_type", "") or ("im" if channel_id.startswith("D") else "")
         is_dm = channel_type in {"im", "mpim"}  # Both 1:1 and group DMs
+        if self._slack_thread_lines():
+            is_dm = channel_type == "im"
         if is_dm and self._slack_disable_dms():
             logger.info(
                 "[Slack] Ignoring DM because Slack DMs are disabled: channel=%s user=%s",
