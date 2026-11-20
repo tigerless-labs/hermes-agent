@@ -1356,8 +1356,9 @@ def build_session_context(
     source: SessionSource, config: GatewayConfig, session_entry: Optional[SessionEntry] = None
 ) -> SessionContext:
     """Build a full session context (for system prompt injection)."""
+    from gateway.thread_lines import reads_as_multi_user
     connected = config.get_connected_platforms()
-    shared = is_shared_multi_user_session(
+    shared = reads_as_multi_user(
         source, group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
         thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
     )

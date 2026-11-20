@@ -32,7 +32,7 @@ from gateway.run_inbound_unauthorized import (
     unauthorized_owner_hint,
 )
 from gateway.session import (
-    SessionSource, build_session_context, is_shared_multi_user_session,
+    SessionSource, build_session_context,
     neutralize_untrusted_inline_text,
 )
 from gateway.turn_lease import TurnLeaseTimeoutError
@@ -1429,7 +1429,8 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
 
     def _prefix_inbound_sender_context(self, event: MessageEvent, source: SessionSource, message_text: str) -> str:
         """Attribute the sender in shared multi-user sessions and prepend history-backfill channel context."""
-        _is_shared_multi_user = is_shared_multi_user_session(
+        from gateway.thread_lines import reads_as_multi_user
+        _is_shared_multi_user = reads_as_multi_user(
             source, group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
         )
