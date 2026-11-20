@@ -101,6 +101,9 @@ class SessionSource:
     # Wire-invisible: the adapter's verdict that this conversation is a group chat (Slack ``group_chat_flag``);
     # None when the adapter gave none. Bound per turn as HERMES_SESSION_GROUP_CHAT.
     group_chat: Optional[bool] = field(default=None, compare=False)
+    # Wire-invisible: the message that started the work a background wake carries on (the wake's own
+    # ``message_id`` is cleared). Bound per turn as HERMES_SESSION_ORIGIN_MESSAGE_ID.
+    origin_message_id: Optional[str] = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         # Mirror scope_id/guild_id onto each other (scope_id wins) so readers of EITHER agree.
