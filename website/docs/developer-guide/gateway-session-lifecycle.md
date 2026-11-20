@@ -249,6 +249,9 @@ agent:main:{platform}:{chat_type}[:{chat_id}][:{thread_id}][:{participant_id}]
   - `group_sessions_per_user` (default: `True`) — group/channel sessions are isolated.
   - `thread_sessions_per_user` (default: `False`) — threads are **shared** by default
     (Telegram forum topics, Discord threads, Slack threads all share one session per thread).
+    With it on, a plugin can keep chosen chats' threads shared (`ctx.register_shared_thread_chats`, a predicate
+    over the source); both functions ask it through `gateway.thread_sharing.threads_per_user`, and only a
+    literal `True` shares.
 - `participant_id` = `user_id_alt` or `user_id` (in that priority).
 - WhatsApp identifiers are canonicalized to handle JID/LID alias flips.
 

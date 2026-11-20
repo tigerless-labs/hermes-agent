@@ -65,6 +65,11 @@ class SessionJudgement(ABC):
         """True when a visible session's tool result may be shown; every result by default."""
         return True
 
+    def private_to(self, place: SessionPlace) -> Optional[str]:
+        """Who a session the reader may not see belongs to, when the reader is told it exists but is not theirs
+        to read; None (the default) hides it silently."""
+        return None
+
     def finish(self) -> None:
         """Called once when the session_search call ends, however it ended."""
         return None
@@ -177,6 +182,25 @@ class VisibilityGate:
 
     def sees_all(self, db, *session_ids: Optional[str]) -> bool:
         return all(self.sees(db, sid) for sid in session_ids)
+
+    def owner_of_hidden(self, db, *session_ids: Optional[str]) -> Optional[str]:
+        """The owner the judgement names for the first of ``session_ids`` the reader may not see, or None."""
+        for session_id in session_ids:
+            if not session_id or self._judgement is None or self.sees(db, session_id):
+                continue
+            place = self._place(db, session_id)
+            if place is None:
+                continue
+            try:
+                owner = self._bounded(self._judgement.private_to, place)
+            except _Tripped:
+                return None
+            except Exception as exc:
+                logger.warning("session visibility owner lookup failed (%s); hiding silently", type(exc).__name__)
+                return None
+            if isinstance(owner, str) and owner:
+                return owner
+        return None
 
     def _ask(self, question: Callable, *args) -> bool:
         try:

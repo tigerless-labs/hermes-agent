@@ -949,7 +949,7 @@ On messaging platforms, sessions are keyed by a deterministic session key built 
 | Discord DM | `agent:main:discord:dm:<chat_id>` | One session per DM chat |
 | WhatsApp DM | `agent:main:whatsapp:dm:<canonical_identifier>` | One session per DM user (LID/phone aliases collapse to one identity when mapping exists) |
 | Group chat | `agent:main:<platform>:group:<chat_id>:<user_id>` | Per-user inside the group when the platform exposes a user ID |
-| Group thread/topic | `agent:main:<platform>:group:<chat_id>:<thread_id>` | Shared session for all thread participants (default). Per-user with `thread_sessions_per_user: true`. |
+| Group thread/topic | `agent:main:<platform>:group:<chat_id>:<thread_id>` | Shared session for all thread participants (default). Per-user with `thread_sessions_per_user: true`, except in chats a plugin's shared-thread predicate keeps shared (`ctx.register_shared_thread_chats`). |
 | Channel | `agent:main:<platform>:channel:<chat_id>:<user_id>` | Per-user inside the channel when the platform exposes a user ID |
 
 When Hermes cannot get a participant identifier for a shared chat, it falls back to one shared session for that room.
