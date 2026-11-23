@@ -1433,6 +1433,9 @@ class GatewayTurnMixin:
         # One-time prompt if no home channel is set (webhooks deliver to configured targets instead).
         if not human_platform:
             return
+        from agent.onboarding import home_channel_prompt_enabled
+        if not home_channel_prompt_enabled(_load_gateway_config()):
+            return
         platform_name = source.platform.value
         env_key = _home_target_env_var(platform_name)
         # Multiplex: the home channel may live only in the profile secret scope, not os.environ.
