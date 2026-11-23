@@ -1187,6 +1187,9 @@ class GatewayNotificationsMixin(GatewayNotificationOwnershipMixin):
             if getattr(source, "message_id", None):
                 from gateway.session_identity import replace_source
                 source = replace_source(source, message_id=None)
+            if trigger_message_id:
+                from gateway.session_identity import replace_source
+                source = replace_source(source, origin_message_id=trigger_message_id)
             synth_event = MessageEvent(
                 text=synth_text, message_type=MessageType.TEXT, source=source, internal=True,
                 metadata=metadata,

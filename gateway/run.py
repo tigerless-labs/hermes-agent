@@ -4269,7 +4269,8 @@ class GatewayRunner(
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
             cron_session="",
-            group_chat=group_chat_value(context.source))
+            group_chat=group_chat_value(context.source),
+            origin_message_id=str(getattr(context.source, "origin_message_id", None) or ""))
 
     def _clear_session_env(self, tokens: list) -> None:
         """Restore session context variables to their pre-handler values."""
