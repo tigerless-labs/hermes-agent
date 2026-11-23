@@ -174,6 +174,13 @@ def first_contact_turn_note(
         return PLAIN_INTRO_NOTE
 
 
+def home_channel_prompt_enabled(config: Mapping[str, Any]) -> bool:
+    """``config.onboarding.home_channel_prompt``: ``"off"`` (or ``false``) never asks a new
+    conversation to set a home channel; anything else keeps the prompt."""
+    mode = _onboarding_section(config).get("home_channel_prompt")
+    return not (mode is False or (isinstance(mode, str) and mode.strip().lower() == "off"))
+
+
 def profile_build_directive() -> str:
     """System-note directive appended to the very first message ever.
 
