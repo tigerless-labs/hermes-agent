@@ -1,6 +1,7 @@
 """Exa web search + content extraction via the ``exa-py`` SDK (lazy-installed).
 
-Env: ``EXA_API_KEY`` (https://exa.ai). Both methods are sync — Exa's SDK is
+Env: ``EXA_API_KEY`` (https://exa.ai); optional ``EXA_BASE_URL`` sends the SDK's requests to
+another address (e.g. a forwarder that holds the real key). Both methods are sync — Exa's SDK is
 sync-only; the dispatcher threads extract when the caller is async.
 """
 
@@ -22,7 +23,8 @@ _MISSING_KEY = "EXA_API_KEY environment variable not set. Get your API key at ht
 def _get_exa_client() -> Any:
     def _factory(api_key: str) -> Any:
         from exa_py import Exa  # deliberately lazy
-        client = Exa(api_key=api_key)
+        base_url = provider_env("EXA_BASE_URL")  # unset: Exa's own address, as before
+        client = Exa(api_key=api_key, base_url=base_url) if base_url else Exa(api_key=api_key)
         client.headers["x-exa-integration"] = "hermes-agent"
         return client
 
